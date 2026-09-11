@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: OpenAI service status
+    url: https://status.openai.com/
+    about: Check upstream incidents such as capacity or availability problems.
