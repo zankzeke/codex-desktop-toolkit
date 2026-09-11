@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible Toolkit problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** upload real Codex session files, Authorization/Cookie headers, tokens, or complete request/response bodies.
+  - type: input
+    id: version
+    attributes:
+      label: Codex Desktop / CLI version
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - HTTPS/SSE
+        - WebSocket
+        - Both / unknown
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe what happened and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: safe_logs
+    attributes:
+      label: Redacted logs
+      description: Paste only logs you have checked for credentials and private content.
