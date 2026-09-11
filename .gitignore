@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local runtime / secrets / generated data
+.env
+.env.*
+*.log
+*.bak
+*.bak.*
+*.tmp.*
+
+# Never commit Codex user state or sessions
+.codex/
+sessions/
+state_5.sqlite
+config.toml
+
+# Packaging
+build/
+dist/
+*.egg-info/
