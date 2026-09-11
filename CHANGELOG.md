@@ -11,3 +11,4 @@ Initial public release.
 - Tkinter GUI for proxy control, config management, session repair, and diagnostics.
 - Optional PowerShell `agy` proxy wrapper with environment restoration.
 - Windows CI and regression/integration tests.
+- Final public source assembly verified against the reviewed release files.
