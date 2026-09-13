@@ -36,8 +36,8 @@ jobs:
                   raise SystemExit(f'unexpected occurrence count in {path}: {old!r} -> {text.count(old)}')
               p.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
 
-          # The packaged Windows console can use a legacy code page. Keep runtime log
-          # separators/markers ASCII-only so logs remain readable regardless of code page.
+          # Keep runtime console log separators/markers ASCII-only so packaged
+          # Windows builds remain readable under legacy/OEM console code pages.
           replace_exact(
               'proxy.py',
               'format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",',
@@ -86,7 +86,7 @@ jobs:
           replace_exact('.github/workflows/release.yml', 'DEFAULT_TAG: v0.2.0', 'DEFAULT_TAG: v0.2.1', 1)
           replace_exact(
               'README.md',
-              'Download `CodexBridgeToolkit-v0.2.0-windows-x64.zip`.',
+              'Download `CodexBridgeToolkit-0.2.0-windows-x64.zip`.',
               'Download `CodexBridgeToolkit-0.2.1-windows-x64.zip`.',
               1,
           )
@@ -106,7 +106,6 @@ jobs:
               text = text.replace(marker, marker + entry, 1)
               changelog.write_text(text, encoding='utf-8', newline='\n')
 
-          # Regression test: the strings emitted by the proxy logger must remain ASCII-safe.
           test = Path('tests/test_console_logging.py')
           test.write_text('''from pathlib import Path\n\n\ndef test_proxy_runtime_log_markers_are_ascii_safe():\n    text = Path("proxy.py").read_text(encoding="utf-8")\n    required = [\n        "%(name)s | %(message)s",\n        "[OUT] %s %s",\n        "[IN ] upstream status",\n        "[WS ] connect ->",\n        "[WS ] upstream established; accepting client",\n        "[WS ] disconnected",\n    ]\n    for marker in required:\n        assert marker in text\n        assert marker.isascii()\n\n    forbidden_runtime_markers = [\n        "%(name)s — %(message)s",\n        "logger.info(\\\"→",\n        "logger.info(\\\"←",\n        "logger.info(\\\"⇆",\n    ]\n    for marker in forbidden_runtime_markers:\n        assert marker not in text\n''', encoding='utf-8', newline='\n')
           '@ | python -
