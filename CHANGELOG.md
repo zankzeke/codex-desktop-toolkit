@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 - 2026-09-13
+
+- Fixed garbled/mojibake characters in the packaged Windows proxy console.
+- Fixed Codex running-state detection when tasklist returns lowercase `codex.exe`.
+- Runtime log separators and transport markers are now ASCII-safe across Windows code pages.
+- No proxy request rewriting or upstream routing semantics changed.
+
 ## 0.2.0 - 2026-09-13
 
 - Renamed the desktop UI to **Codex Bridge Toolkit** while keeping the repository URL stable.

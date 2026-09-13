@@ -60,7 +60,7 @@ The official Codex source currently defines the same ChatGPT Codex base URL. Thi
 For most Windows users, use the packaged build from **GitHub Releases**:
 
 - [Latest Release](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
-- Download `CodexBridgeToolkit-0.2.0-windows-x64.zip`.
+- Download `CodexBridgeToolkit-0.2.1-windows-x64.zip`.
 - Extract it and keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same folder.
 - Start `CodexBridgeToolkit.exe`.
 

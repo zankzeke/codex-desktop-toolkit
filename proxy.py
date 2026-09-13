@@ -68,7 +68,7 @@ from sse_handler import SSELineBuffer, rewrite_sse_line
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("proxy")
@@ -283,14 +283,14 @@ class CodexProxy:
 
         if msg_fixes or reasoning_drops:
             logger.info(
-                "→ %s %s | msg-id fixes: %d | reasoning drops: %d",
+                "[OUT] %s %s | msg-id fixes: %d | reasoning drops: %d",
                 request.method,
                 path.split("?")[0],
                 msg_fixes,
                 reasoning_drops,
             )
         else:
-            logger.info("→ %s %s  →  %s", request.method, path.split("?")[0], self._mask_url(upstream_url))
+            logger.info("[OUT] %s %s -> %s", request.method, path.split("?")[0], self._mask_url(upstream_url))
 
         # ---- Forward to upstream ----
         try:
@@ -306,7 +306,7 @@ class CodexProxy:
             logger.error("Upstream connection error: %s", type(exc).__name__)
             return web.Response(status=502, text="Proxy upstream connection failed")
 
-        logger.info("← upstream status: %d  (url: %s)", upstream_resp.status, self._mask_url(upstream_url))
+        logger.info("[IN ] upstream status: %d (url: %s)", upstream_resp.status, self._mask_url(upstream_url))
 
         # ---- Build response headers ----
         resp_headers: dict[str, str] = {}
@@ -359,7 +359,7 @@ class CodexProxy:
             elif not kl.startswith("sec-websocket-") and kl not in ("connection", "upgrade", "host"):
                 fwd_headers[k] = v
 
-        logger.info("⇆ WS Connect → %s", self._mask_url(upstream_url))
+        logger.info("[WS ] connect -> %s", self._mask_url(upstream_url))
         id_map: dict[str, str] = {}
 
         try:
@@ -392,7 +392,7 @@ class CodexProxy:
                         
                 await ws_client.prepare(request)
                 
-                logger.info("⇆ WS Upstream established, accepting client.")
+                logger.info("[WS ] upstream established; accepting client")
 
                 async def client_to_upstream():
                     try:
@@ -475,7 +475,7 @@ class CodexProxy:
         except Exception as e:
             logger.error("WS Proxy Error: %s", type(e).__name__)
         finally:
-            logger.info("⇆ WS Disconnected")
+            logger.info("[WS ] disconnected")
 
         # Fallback if ws_client was prepared
         try:
