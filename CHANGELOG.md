@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 - 2026-09-13
+
+### ✨ 新特性与优化 (Features & Improvements)
+- **上游地址与代理管理 (Upstream & Proxy Management)**: 
+  - 将原有的单行文本输入框升级为支持记忆的下拉菜单。
+  - 支持新增、编辑、删除自定义的上游 API 地址和科学上网代理。
+  - 鼠标选中标签后，右侧自动显示该标签对应的真实 URL，告别盲填。
+  - 支持配置持久化，软件重启后自动恢复上一次选择的代理和地址。
+- **UI 细节优化 (UI Polish)**:
+  - 所有的弹出管理窗口和新增对话框现在会完美居中显示，不再默认弹出到屏幕左上角。
+  - 增大了“新增”窗口的默认高度，并补齐了操作对齐的“取消”按钮。
+  - 将上游代理“示例”按钮替换为更清晰的“说明”弹窗，提供更直观的端口配置教程。
+
+### 🐛 缺陷修复 (Bug Fixes)
+- **Codex 重启修复 (Codex Restart Fix)**:
+  - 修复了点击“🔃 重启 Codex”时提示“未找到 codex.exe”的 Bug。
+  - 现在会在结束进程前优先捕获 Codex 的实际运行路径。
+  - 增加了对 `AppData\Local\OpenAI\Codex\bin\` 目录下带有哈希值的动态版本的全局遍历回退支持。
+
 ## 0.2.2 - 2026-09-13
 
 - Fixed packaged proxy processes surviving after the GUI window closes.
@@ -37,3 +56,4 @@ Initial public release.
 - Optional PowerShell `agy` proxy wrapper with environment restoration.
 - Windows CI and regression/integration tests.
 - Final public source assembly verified against the reviewed release files.
+

@@ -42,7 +42,11 @@ CODEX_EXE_CANDIDATES = [
 # ─── ID 修复逻辑（与 fix_codex_ids.py 共享） ──────────────────────────────────
 
 from history_fixer import fix_rollout_file, fast_check_bad_ids, is_codex_running
-from config_manager import enable_proxy_config, disable_proxy_config
+from config_manager import (
+    enable_proxy_config, disable_proxy_config, 
+    load_upstreams, save_upstreams,
+    load_proxies, save_proxies
+)
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
 from ui_theme import ThemeManager, APP_VERSION
 from process_utils import (
@@ -111,14 +115,11 @@ def scan_sessions():
 # ─── Codex 重启 ────────────────────────────────────────────────────────────────
 
 def find_codex_exe() -> Path | None:
-    for p in CODEX_EXE_CANDIDATES:
-        if p.exists():
-            return p
-    # Try to find via tasklist
+    # 1. Try to find via running process first (most accurate)
     try:
         result = subprocess.run(
             ["powershell", "-Command",
-             "(Get-Process Codex -ErrorAction SilentlyContinue | Select-Object -First 1).Path"],
+             "(Get-Process codex -ErrorAction SilentlyContinue | Select-Object -First 1).Path"],
             capture_output=True, text=True, timeout=5
         )
         path_str = result.stdout.strip()
@@ -126,18 +127,33 @@ def find_codex_exe() -> Path | None:
             return Path(path_str)
     except Exception:
         pass
+        
+    # 2. Check candidates
+    for p in CODEX_EXE_CANDIDATES:
+        if p.exists():
+            return p
+            
+    # 3. Search in bin folder for versioned directories
+    bin_dir = Path.home() / "AppData" / "Local" / "OpenAI" / "Codex" / "bin"
+    if bin_dir.exists():
+        for exe in bin_dir.rglob("codex.exe"):
+            if exe.exists():
+                return exe
+                
     return None
-
 
 def restart_codex():
     """Kill Codex Desktop and relaunch it."""
-    subprocess.run(["taskkill", "/F", "/IM", "Codex.exe"], capture_output=True)
-    time.sleep(1.5)
+    # Find the exe BEFORE we kill the process
     exe = find_codex_exe()
+    
+    subprocess.run(["taskkill", "/F", "/IM", "codex.exe"], capture_output=True)
+    time.sleep(1.5)
+    
     if exe:
         subprocess.Popen([str(exe)], creationflags=subprocess.DETACHED_PROCESS)
         return True, str(exe)
-    return False, "未找到 Codex.exe"
+    return False, "未找到 codex.exe"
 
 
 # ─── GUI ───────────────────────────────────────────────────────────────────────
@@ -446,15 +462,39 @@ class ProxyTab(ttk.Frame):
         ttk.Entry(row0, textvariable=self._port_var, width=8).pack(side=tk.LEFT, padx=(0, 20))
 
         ttk.Label(row0, text="上游代理（科学上网）：").pack(side=tk.LEFT)
-        self._proxy_var = tk.StringVar(value="")
-        ttk.Entry(row0, textvariable=self._proxy_var, width=26).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(row0, text="示例", width=5, command=self._show_proxy_examples).pack(
+        self._proxies_dict, selected_proxy = load_proxies()
+        self._proxy_var = tk.StringVar(value=selected_proxy)
+        
+        self._proxy_cb = ttk.Combobox(
+            row0, textvariable=self._proxy_var,
+            values=list(self._proxies_dict.keys()) + ["<编辑/新增代理...>"],
+            state="readonly", width=22
+        )
+        self._proxy_cb.pack(side=tk.LEFT, padx=(0, 4))
+        self._proxy_cb.bind("<<ComboboxSelected>>", self._on_proxy_selected)
+        
+        self._proxy_lbl = ttk.Label(row0, text=self._proxies_dict.get(selected_proxy, ""), foreground="#6c7086", width=14, anchor=tk.W)
+        self._proxy_lbl.pack(side=tk.LEFT, padx=(0, 4))
+        
+        ttk.Button(row0, text="说明", width=5, command=self._show_proxy_help).pack(
             side=tk.LEFT, padx=(0, 12)
         )
 
         ttk.Label(row0, text="上游地址：").pack(side=tk.LEFT)
-        self._upstream_var = tk.StringVar(value="https://chatgpt.com/backend-api/codex")
-        ttk.Entry(row0, textvariable=self._upstream_var, width=38).pack(side=tk.LEFT)
+        
+        self._upstreams_dict, selected_up = load_upstreams()
+        self._upstream_var = tk.StringVar(value=selected_up)
+        
+        self._upstream_cb = ttk.Combobox(
+            row0, textvariable=self._upstream_var,
+            values=list(self._upstreams_dict.keys()) + ["<编辑/新增地址...>"],
+            state="readonly", width=14
+        )
+        self._upstream_cb.pack(side=tk.LEFT, padx=(0, 4))
+        self._upstream_cb.bind("<<ComboboxSelected>>", self._on_upstream_selected)
+        
+        self._upstream_url_lbl = ttk.Label(row0, text=self._upstreams_dict.get(selected_up, ""), foreground="#6c7086", width=25, anchor=tk.W)
+        self._upstream_url_lbl.pack(side=tk.LEFT, padx=(0, 4))
 
         # ── Codex config.toml 注入区 ──────────────────────────────
         toml_frame = ttk.LabelFrame(self, text=" Codex 配置文件 (config.toml) ")
@@ -503,6 +543,216 @@ class ProxyTab(ttk.Frame):
             relief=tk.FLAT, borderwidth=0,
         )
         self._log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+    def _center_window(self, win, parent):
+        win.update_idletasks()
+        w = win.winfo_width()
+        h = win.winfo_height()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (w // 2)
+        y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (h // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _on_proxy_selected(self, event=None):
+        url = self._proxy_var.get()
+        if url == "<编辑/新增代理...>":
+            self._manage_proxies()
+            return
+        label = self._proxies_dict.get(url, "")
+        self._proxy_lbl.config(text=label)
+        save_proxies(self._proxies_dict, url)
+
+    def _manage_proxies(self):
+        # Reset combo to previous valid selection immediately
+        # (if we cancel, it should not stay on "<编辑...>")
+        prev = list(self._proxies_dict.keys())[0] if self._proxies_dict else ""
+        for k in self._proxies_dict:
+            if self._proxies_dict.get(k) == self._proxy_lbl.cget("text"):
+                prev = k
+                break
+        self._proxy_var.set(prev)
+
+        top = tk.Toplevel(self)
+        top.title("管理上游代理")
+        top.geometry("500x300")
+        top.transient(self._app)
+        self._center_window(top, self._app)
+        top.grab_set()
+
+        frame = ttk.Frame(top, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        lb = tk.Listbox(list_frame, font=("Segoe UI", 10), bg=self._app.palette["surface"], fg=self._app.palette["fg"])
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        for url, lbl in self._proxies_dict.items():
+            lb.insert(tk.END, f"{url} - {lbl}")
+
+        def _add():
+            add_top = tk.Toplevel(top)
+            add_top.title("新增代理")
+            add_top.geometry("400x200")
+            add_top.transient(top)
+            self._center_window(add_top, top)
+            add_top.grab_set()
+
+            ttk.Label(add_top, text="URL (如 http://127.0.0.1:7890):").pack(pady=(10, 0), padx=10, anchor=tk.W)
+            url_var = tk.StringVar()
+            ttk.Entry(add_top, textvariable=url_var).pack(fill=tk.X, padx=10)
+
+            ttk.Label(add_top, text="标签名 (如 Clash):").pack(pady=(10, 0), padx=10, anchor=tk.W)
+            name_var = tk.StringVar()
+            ttk.Entry(add_top, textvariable=name_var).pack(fill=tk.X, padx=10)
+
+            def _save():
+                u = url_var.get().strip()
+                n = name_var.get().strip()
+                if not n or not u:
+                    messagebox.showerror("错误", "URL和标签名不能为空", parent=add_top)
+                    return
+                if u in self._proxies_dict:
+                    messagebox.showerror("错误", "代理URL已存在", parent=add_top)
+                    return
+                self._proxies_dict[u] = n
+                lb.insert(tk.END, f"{u} - {n}")
+                
+                self._proxy_cb["values"] = list(self._proxies_dict.keys()) + ["<编辑/新增代理...>"]
+                save_proxies(self._proxies_dict, self._proxy_var.get())
+                add_top.destroy()
+
+            btn_f = ttk.Frame(add_top)
+            btn_f.pack(pady=15)
+            ttk.Button(btn_f, text="保存", command=_save).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_f, text="取消", command=add_top.destroy).pack(side=tk.LEFT, padx=5)
+
+        def _delete():
+            sel = lb.curselection()
+            if not sel: return
+            idx = sel[0]
+            val = lb.get(idx)
+            url = val.split(" - ")[0]
+            if url == "":
+                messagebox.showwarning("警告", "无法删除直连选项", parent=top)
+                return
+            del self._proxies_dict[url]
+            lb.delete(idx)
+            
+            self._proxy_cb["values"] = list(self._proxies_dict.keys()) + ["<编辑/新增代理...>"]
+            if self._proxy_var.get() == url:
+                self._proxy_var.set("")
+                self._on_proxy_selected()
+            save_proxies(self._proxies_dict, self._proxy_var.get())
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="新增", command=_add).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="删除选定", command=_delete).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="完成", command=top.destroy).pack(side=tk.RIGHT)
+
+    def _on_upstream_selected(self, event=None):
+        label = self._upstream_var.get()
+        if label == "<编辑/新增地址...>":
+            self._manage_upstreams()
+            return
+        url = self._upstreams_dict.get(label, "")
+        self._upstream_url_lbl.config(text=url)
+        save_upstreams(self._upstreams_dict, label)
+
+    def _manage_upstreams(self):
+        prev = list(self._upstreams_dict.keys())[0] if self._upstreams_dict else ""
+        for k in self._upstreams_dict:
+            if k == self._upstream_url_lbl.cget("text"):
+                pass # not working properly because label is different
+        # Better fallback:
+        prev = "官方直连"
+        for k, v in self._upstreams_dict.items():
+            if v == self._upstream_url_lbl.cget("text"):
+                prev = k
+                break
+        self._upstream_var.set(prev)
+
+        top = tk.Toplevel(self)
+        top.title("管理上游地址")
+        top.geometry("500x300")
+        top.transient(self._app)
+        self._center_window(top, self._app)
+        top.grab_set()
+
+        frame = ttk.Frame(top, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        lb = tk.Listbox(list_frame, font=("Segoe UI", 10), bg=self._app.palette["surface"], fg=self._app.palette["fg"])
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        for lbl, url in self._upstreams_dict.items():
+            lb.insert(tk.END, f"{lbl} - {url}")
+
+        def _add():
+            add_top = tk.Toplevel(top)
+            add_top.title("新增上游地址")
+            add_top.geometry("400x200")
+            add_top.transient(top)
+            self._center_window(add_top, top)
+            add_top.grab_set()
+
+            ttk.Label(add_top, text="标签名 (如 自定义):").pack(pady=(10, 0), padx=10, anchor=tk.W)
+            name_var = tk.StringVar()
+            ttk.Entry(add_top, textvariable=name_var).pack(fill=tk.X, padx=10)
+
+            ttk.Label(add_top, text="URL (如 https://api.xxx/v1):").pack(pady=(10, 0), padx=10, anchor=tk.W)
+            url_var = tk.StringVar()
+            ttk.Entry(add_top, textvariable=url_var).pack(fill=tk.X, padx=10)
+
+            def _save():
+                n = name_var.get().strip()
+                u = url_var.get().strip()
+                if not n or not u:
+                    messagebox.showerror("错误", "标签名和URL不能为空", parent=add_top)
+                    return
+                if n in self._upstreams_dict:
+                    messagebox.showerror("错误", "标签名已存在", parent=add_top)
+                    return
+                self._upstreams_dict[n] = u
+                lb.insert(tk.END, f"{n} - {u}")
+                
+                self._upstream_cb["values"] = list(self._upstreams_dict.keys()) + ["<编辑/新增地址...>"]
+                save_upstreams(self._upstreams_dict, self._upstream_var.get())
+                add_top.destroy()
+
+            btn_f = ttk.Frame(add_top)
+            btn_f.pack(pady=15)
+            ttk.Button(btn_f, text="保存", command=_save).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_f, text="取消", command=add_top.destroy).pack(side=tk.LEFT, padx=5)
+
+        def _delete():
+            sel = lb.curselection()
+            if not sel: return
+            idx = sel[0]
+            val = lb.get(idx)
+            lbl = val.split(" - ")[0]
+            if lbl == "官方直连":
+                messagebox.showwarning("警告", "无法删除官方直连", parent=top)
+                return
+            del self._upstreams_dict[lbl]
+            lb.delete(idx)
+            
+            # Update combobox
+            self._upstream_cb["values"] = list(self._upstreams_dict.keys()) + ["<编辑/新增地址...>"]
+            if self._upstream_var.get() == lbl:
+                self._upstream_var.set("官方直连")
+                self._on_upstream_selected()
+            save_upstreams(self._upstreams_dict, self._upstream_var.get())
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="新增", command=_add).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="删除选定", command=_delete).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="完成", command=top.destroy).pack(side=tk.RIGHT)
         self._log.tag_config("info", foreground=self._app.palette["accent"])
         self._log.tag_config("warn", foreground=self._app.palette["warn"])
         self._log.tag_config("error", foreground=self._app.palette["danger"])
@@ -512,16 +762,19 @@ class ProxyTab(ttk.Frame):
             side=tk.RIGHT, padx=4, pady=4
         )
 
-    def _show_proxy_examples(self):
+    def _show_proxy_help(self):
         messagebox.showinfo(
-            "常见上游代理地址",
-            "常见填写示例（实际端口以代理软件当前设置为准）：\n\n"
-            "Clash Verge Rev:  http://127.0.0.1:7897\n"
-            "Clash / Mihomo:    http://127.0.0.1:7890\n"
-            "v2rayN (HTTP):     http://127.0.0.1:10809\n"
-            "NekoRay (HTTP):    http://127.0.0.1:2081\n\n"
-            "这里只填写 HTTP / Mixed 端口；8787 是 Toolkit 自己的本地端口。\n"
-            "更多说明见仓库 docs/PROXY_SETUP_ZH.md。",
+            "如何获取科学上网地址",
+            "如果你的网络无法直连官方 OpenAI 或第三方 API，需在此处填写你的翻墙软件局域网地址。\n\n"
+            "如何查找：\n"
+            "1. 打开你的 VPN/代理软件\n"
+            "2. 寻找「局域网端口」、「本地监听」或「HTTP 代理」\n"
+            "3. 组合格式为：http://127.0.0.1:端口号\n\n"
+            "常见的默认地址（下拉列表已提供）：\n"
+            "• v2rayN / NekoBox：http://127.0.0.1:10808\n"
+            "• Clash (Verge 等)：http://127.0.0.1:7890\n"
+            "• Shadowsocks：http://127.0.0.1:1080\n\n"
+            "如果能直连，下拉请选择“无代理 (直连)”。"
         )
 
     def _append_log(self, text: str, tag: str = ""):
@@ -572,8 +825,12 @@ class ProxyTab(ttk.Frame):
             return
 
         port = self._port_var.get().strip()
-        upstream = self._upstream_var.get().strip()
+        label = self._upstream_var.get().strip()
+        upstream = self._upstreams_dict.get(label, "https://chatgpt.com/backend-api/codex")
         upstream_proxy = self._proxy_var.get().strip()
+        
+        # Save selected label
+        save_upstreams(self._upstreams_dict, label)
         
         import urllib.parse
         parsed = urllib.parse.urlparse(upstream)

@@ -7,4 +7,4 @@ def test_gui_closes_full_proxy_tree_and_handles_stale_proxy():
     assert "terminate_process_tree(pid)" in text
     assert "is_packaged_toolkit_proxy(owner_name)" in text
     assert "wait_for_port_free(port_num)" in text
-    assert "常见上游代理地址" in text
+    assert "如何获取科学上网地址" in text

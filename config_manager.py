@@ -41,6 +41,44 @@ def _save_state(state: dict):
                 pass
         raise
 
+def load_upstreams() -> Tuple[dict[str, str], str]:
+    state = _load_state()
+    upstreams = state.get("upstreams", {
+        "官方直连": "https://chatgpt.com/backend-api/codex"
+    })
+    selected = state.get("selected_upstream", "官方直连")
+    if selected not in upstreams:
+        selected = list(upstreams.keys())[0] if upstreams else ""
+    return upstreams, selected
+
+def save_upstreams(upstreams: dict[str, str], selected: str) -> None:
+    state = _load_state()
+    state["upstreams"] = upstreams
+    state["selected_upstream"] = selected
+    _save_state(state)
+
+def load_proxies() -> Tuple[dict[str, str], str]:
+    state = _load_state()
+    proxies = state.get("proxies", {
+        "": "无代理 (直连)",
+        "http://127.0.0.1:10808": "v2rayN / NekoBox",
+        "http://127.0.0.1:7890": "Clash",
+        "http://127.0.0.1:1080": "Shadowsocks"
+    })
+    selected = state.get("selected_proxy", "")
+    if selected not in proxies:
+        if selected:
+            proxies[selected] = "自定义"
+        else:
+            selected = ""
+    return proxies, selected
+
+def save_proxies(proxies: dict[str, str], selected: str) -> None:
+    state = _load_state()
+    state["proxies"] = proxies
+    state["selected_proxy"] = selected
+    _save_state(state)
+
 def enable_proxy_config(port: int, ws_enabled: bool) -> Tuple[bool, str]:
     if not CONFIG_PATH.exists():
         return False, f"Config file not found: {CONFIG_PATH}"
