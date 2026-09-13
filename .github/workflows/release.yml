@@ -109,20 +109,21 @@ jobs:
 
           Windows packaged release. No separate Python installation is required.
 
-          **Recommended:** download `CodexBridgeToolkit-$version-windows-x64.zip`, extract it, and keep both executables together.
+          **Recommended:** download CodexBridgeToolkit-$version-windows-x64.zip, extract it, and keep both executables together.
 
           ### Highlights
           - New custom app icon and branded header
           - Four persistent themes: 午夜蓝 / 石墨黑 / 深海蓝 / 明亮
           - Windows title-bar tinting on supported systems
-          - Fixes case-sensitive `Codex.exe` process detection
+          - Fixes case-sensitive Codex.exe process detection
           - Session ID repair + HTTP/SSE/WebSocket compatibility proxy
-          - Antigravity / `agy` PowerShell proxy helper
+          - Antigravity / agy PowerShell proxy helper
 
           This is an unofficial community project and is not affiliated with OpenAI.
           "@ | Set-Content -Encoding utf8 release-notes.md
 
           if (gh release view $tag 2>$null) {
+            gh release edit $tag --title "Codex Bridge Toolkit $tag" --notes-file release-notes.md
             gh release upload $tag $zip dist/CodexBridgeToolkit.exe dist/CodexBridgeProxy.exe --clobber
           } else {
             gh release create $tag $zip dist/CodexBridgeToolkit.exe dist/CodexBridgeProxy.exe `
