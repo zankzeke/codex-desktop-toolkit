@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.2.0
+        default: v0.2.1
   push:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     env:
-      DEFAULT_TAG: v0.2.0
+      DEFAULT_TAG: v0.2.1
     steps:
       - uses: actions/checkout@v4
 
@@ -83,6 +83,7 @@ jobs:
           - HTTP/SSE/WebSocket compatibility proxy
           - Antigravity/agy PowerShell proxy helper
           - Case-insensitive Codex process detection fix
+          - Windows console-safe proxy logging
           "@ | Set-Content -Encoding utf8 "$dir/PORTABLE_README.txt"
           Compress-Archive -Path "$dir/*" -DestinationPath "release/CodexBridgeToolkit-$version-windows-x64.zip" -Force
           "zip=release/CodexBridgeToolkit-$version-windows-x64.zip" >> $env:GITHUB_OUTPUT
@@ -112,10 +113,11 @@ jobs:
           **Recommended:** download CodexBridgeToolkit-$version-windows-x64.zip, extract it, and keep both executables together.
 
           ### Highlights
-          - New custom app icon and branded header
+          - Custom app icon and branded header
           - Four persistent themes: 午夜蓝 / 石墨黑 / 深海蓝 / 明亮
           - Windows title-bar tinting on supported systems
-          - Fixes case-sensitive Codex.exe process detection
+          - Fixes case-sensitive Codex process detection in history repair and diagnostics
+          - Fixes garbled characters in packaged Windows proxy logs
           - Session ID repair + HTTP/SSE/WebSocket compatibility proxy
           - Antigravity / agy PowerShell proxy helper
 
