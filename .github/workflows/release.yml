@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.2.2
+        default: v0.3.0
   push:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     env:
-      DEFAULT_TAG: v0.2.2
+      DEFAULT_TAG: v0.3.0
     steps:
       - uses: actions/checkout@v4
 
@@ -116,12 +116,10 @@ jobs:
           **Recommended:** download CodexBridgeToolkit-$version-windows-x64.zip, extract it, and keep both executables together.
 
           ### Highlights
-          - Robustly stops the full packaged proxy process tree when the GUI closes
-          - Detects and offers to clean up a stale CodexBridgeProxy process occupying the local port
-          - Adds a Chinese guide for common Clash Verge Rev / Clash / Mihomo / v2rayN / NekoRay upstream proxy addresses
-          - Keeps the v0.2.1 Windows console mojibake and Codex running-state fixes
-          - Session ID repair + HTTP/SSE/WebSocket compatibility proxy
-          - Antigravity / agy PowerShell proxy helper
+          - 📦 **Upstream API & Proxy Profiles**: Dropdowns with custom labels, persistence across restarts, and built-in editors
+          - ✨ **Polished Dialogs**: Properly centered popups with standard Cancel buttons
+          - 🐛 **Codex Discovery Fix**: Resolves restart failure by resolving dynamic \`bin/hash\` paths
+          - Tooltips reveal actual API URLs on hover to prevent blind configuration
 
           This is an unofficial community project and is not affiliated with OpenAI.
           "@ | Set-Content -Encoding utf8 release-notes.md
