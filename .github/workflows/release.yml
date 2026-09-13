@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.2.1
+        default: v0.2.2
   push:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     env:
-      DEFAULT_TAG: v0.2.1
+      DEFAULT_TAG: v0.2.2
     steps:
       - uses: actions/checkout@v4
 
@@ -81,9 +81,10 @@ jobs:
           - Multi-theme polished GUI and custom application icon
           - Codex session synthetic-ID repair
           - HTTP/SSE/WebSocket compatibility proxy
+          - Robust proxy process-tree shutdown on GUI exit
+          - Stale CodexBridgeProxy process cleanup when port 8787 is occupied
           - Antigravity/agy PowerShell proxy helper
           - Case-insensitive Codex process detection fix
-          - Windows console-safe proxy logging
           "@ | Set-Content -Encoding utf8 "$dir/PORTABLE_README.txt"
           Compress-Archive -Path "$dir/*" -DestinationPath "release/CodexBridgeToolkit-$version-windows-x64.zip" -Force
           "zip=release/CodexBridgeToolkit-$version-windows-x64.zip" >> $env:GITHUB_OUTPUT
@@ -113,11 +114,10 @@ jobs:
           **Recommended:** download CodexBridgeToolkit-$version-windows-x64.zip, extract it, and keep both executables together.
 
           ### Highlights
-          - Custom app icon and branded header
-          - Four persistent themes: 午夜蓝 / 石墨黑 / 深海蓝 / 明亮
-          - Windows title-bar tinting on supported systems
-          - Fixes case-sensitive Codex process detection in history repair and diagnostics
-          - Fixes garbled characters in packaged Windows proxy logs
+          - Robustly stops the full packaged proxy process tree when the GUI closes
+          - Detects and offers to clean up a stale CodexBridgeProxy process occupying the local port
+          - Adds a Chinese guide for common Clash Verge Rev / Clash / Mihomo / v2rayN / NekoRay upstream proxy addresses
+          - Keeps the v0.2.1 Windows console mojibake and Codex running-state fixes
           - Session ID repair + HTTP/SSE/WebSocket compatibility proxy
           - Antigravity / agy PowerShell proxy helper
 
