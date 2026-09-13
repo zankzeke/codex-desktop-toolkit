@@ -70,12 +70,14 @@ jobs:
           Copy-Item dist/CodexBridgeToolkit.exe "$dir/CodexBridgeToolkit.exe"
           Copy-Item dist/CodexBridgeProxy.exe "$dir/CodexBridgeProxy.exe"
           Copy-Item README.md "$dir/README.md"
+          Copy-Item docs/PROXY_SETUP_ZH.md "$dir/PROXY_SETUP_ZH.md"
           Copy-Item LICENSE "$dir/LICENSE"
           @"
           Codex Bridge Toolkit $tag
 
           Start CodexBridgeToolkit.exe.
           Keep CodexBridgeToolkit.exe and CodexBridgeProxy.exe in the same directory.
+          See PROXY_SETUP_ZH.md for common Clash/v2rayN/Mihomo upstream proxy address examples.
 
           Features in this release:
           - Multi-theme polished GUI and custom application icon
