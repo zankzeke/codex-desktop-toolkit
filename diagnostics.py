@@ -46,14 +46,15 @@ def get_diagnostics(port: int) -> dict:
         }
     }
     
-    # Check Codex
+    # Check Codex. tasklist can return the process name with different casing,
+    # so always normalise stdout before matching.
     import subprocess
     try:
         res = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq Codex.exe", "/NH"],
             capture_output=True, text=True, timeout=2
         )
-        if "Codex.exe" in res.stdout:
+        if "codex.exe" in res.stdout.lower():
             diag["codex"]["running"] = True
     except Exception:
         pass
