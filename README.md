@@ -3,12 +3,15 @@
 > **Codex Desktop session repair + ID-fix compatibility proxy + Antigravity/agy network helper for Windows.**  
 > Windows 下的 Codex Desktop 会话修复、Responses API / SSE / WebSocket 本地兼容代理、Antigravity `agy` 专属代理与运行诊断工具。
 
+[![Latest Release](https://img.shields.io/github/v/release/zankzeke/codex-desktop-toolkit?label=Windows%20Release)](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
 [![CI](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Codex Bridge Toolkit is designed for a specific compatibility problem: older or third-party-modified Codex sessions may contain synthetic item IDs such as `resp_<uuid>_msg` or `item_<hex>`. Replaying those sessions against the official Codex backend can lead to ID validation failures or stale reasoning references.
 
 The toolkit provides both an **offline JSONL fixer** and a **local live proxy** for HTTP/SSE/WebSocket traffic.
+
+**Search keywords:** Codex Desktop, codex++ ID fix, Responses API proxy, SSE, WebSocket, Windows, Antigravity, `agy`, session repair, compatibility proxy.
 
 > [!IMPORTANT]
 > This project is **not affiliated with, endorsed by, or maintained by OpenAI**. It does not bypass model capacity, rate limits, authentication, billing, or account restrictions. The ChatGPT Codex backend used by the official client is an implementation detail and may change without notice.
@@ -25,7 +28,7 @@ The toolkit provides both an **offline JSONL fixer** and a **local live proxy** 
 - Per-request/per-connection ID maps; concurrent streams do not share mutable request state.
 - `config.toml` editing through `tomlkit`, with automatic backups and provider restore support.
 - Offline session backups and atomic replacement.
-- GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.
+- Multi-theme GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.
 - Optional PowerShell `agy` wrapper that temporarily sets proxy variables and restores the original shell environment afterward.
 
 ## Architecture
@@ -57,9 +60,11 @@ The official Codex source currently defines the same ChatGPT Codex base URL. Thi
 For most Windows users, use the packaged build from **GitHub Releases**:
 
 - [Latest Release](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
-- Download `CodexBridgeToolkit-v0.2.0-windows-x64.zip`.
+- Download `CodexBridgeToolkit-0.2.0-windows-x64.zip`.
 - Extract it and keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same folder.
 - Start `CodexBridgeToolkit.exe`.
+
+No separate Python installation is required for the packaged release.
 
 The GUI includes four persistent themes: **午夜蓝 / 石墨黑 / 深海蓝 / 明亮**, a dedicated app icon, and Windows title-bar tinting where supported.
 
@@ -67,7 +72,16 @@ The GUI includes four persistent themes: **午夜蓝 / 石墨黑 / 深海蓝 / �
 
 The **Antigravity 网络** tab installs an optional PowerShell wrapper for `agy`. Proxy variables are set only while `agy` is running and are restored afterward, so Codex, Git, Python, npm, and the rest of the shell are not globally proxied. The PowerShell profile is backed up before edits and the hook can be removed from the GUI.
 
+This feature is useful when Antigravity/`agy` needs a dedicated outbound HTTP proxy but you do **not** want to change the networking environment for the entire PowerShell session.
+
 ## Requirements
+
+### Packaged release
+
+- Windows 10 or Windows 11
+- Codex Desktop installed and signed in, if you want to use the GUI/config integration
+
+### Running from source
 
 - Windows 10 or Windows 11
 - Python 3.11+
@@ -75,7 +89,14 @@ The **Antigravity 网络** tab installs an optional PowerShell wrapper for `agy`
 
 ## Quick start
 
-### GUI (recommended)
+### Packaged GUI (recommended)
+
+1. Download the latest Windows ZIP from [Releases](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest).
+2. Extract the ZIP.
+3. Keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same directory.
+4. Start `CodexBridgeToolkit.exe`.
+
+### GUI from source
 
 Open PowerShell in the project directory and run:
 
@@ -211,16 +232,18 @@ CI runs the test suite on Windows with Python 3.11 and 3.13.
 
 ```text
 codex_toolkit_gui.py   Tkinter GUI
+ui_theme.py            theme manager, app icon integration, Windows chrome styling
 proxy.py               HTTP / SSE / WebSocket compatibility proxy
 id_rewriter.py         single source of truth for structured ID repair
 sse_handler.py         SSE line framing and event rewrite
 history_fixer.py       offline JSONL repair, backup, atomic replacement
 fix_codex_ids.py       command-line offline fixer
 config_manager.py      config.toml structural editing / provider restore
-powershell_hook.py     optional agy PowerShell wrapper
+powershell_hook.py     optional Antigravity/agy PowerShell wrapper
 diagnostics.py         local health/diagnostic helpers
 start-gui.ps1          GUI bootstrap
 start.ps1              proxy bootstrap
+assets/                 application icon assets
 tests/                 regression/integration tests
 ```
 
