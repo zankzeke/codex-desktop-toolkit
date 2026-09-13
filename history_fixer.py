@@ -18,7 +18,7 @@ def is_codex_running() -> bool:
             ["tasklist", "/FI", "IMAGENAME eq Codex.exe", "/NH"],
             capture_output=True, text=True, timeout=2
         )
-        return "Codex.exe" in res.stdout
+        return "codex.exe" in res.stdout.lower()
     except Exception:
         return False
 

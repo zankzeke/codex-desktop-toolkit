@@ -1,12 +1,12 @@
-# Codex Desktop Toolkit
+# Codex Bridge Toolkit for Windows
 
-> Unofficial Windows compatibility toolkit for Codex Desktop.  
-> Windows 下的 Codex Desktop 会话修复、Responses API 本地兼容代理与诊断工具。
+> **Codex Desktop session repair + ID-fix compatibility proxy + Antigravity/agy network helper for Windows.**  
+> Windows 下的 Codex Desktop 会话修复、Responses API / SSE / WebSocket 本地兼容代理、Antigravity `agy` 专属代理与运行诊断工具。
 
 [![CI](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Codex Desktop Toolkit is designed for a specific compatibility problem: older or third-party-modified Codex sessions may contain synthetic item IDs such as `resp_<uuid>_msg` or `item_<hex>`. Replaying those sessions against the official Codex backend can lead to ID validation failures or stale reasoning references.
+Codex Bridge Toolkit is designed for a specific compatibility problem: older or third-party-modified Codex sessions may contain synthetic item IDs such as `resp_<uuid>_msg` or `item_<hex>`. Replaying those sessions against the official Codex backend can lead to ID validation failures or stale reasoning references.
 
 The toolkit provides both an **offline JSONL fixer** and a **local live proxy** for HTTP/SSE/WebSocket traffic.
 
@@ -51,6 +51,21 @@ https://chatgpt.com/backend-api/codex
 ```
 
 The official Codex source currently defines the same ChatGPT Codex base URL. This is not a stability guarantee; future client/backend changes may require updates here.
+
+## Download
+
+For most Windows users, use the packaged build from **GitHub Releases**:
+
+- [Latest Release](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
+- Download `CodexBridgeToolkit-v0.2.0-windows-x64.zip`.
+- Extract it and keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same folder.
+- Start `CodexBridgeToolkit.exe`.
+
+The GUI includes four persistent themes: **午夜蓝 / 石墨黑 / 深海蓝 / 明亮**, a dedicated app icon, and Windows title-bar tinting where supported.
+
+## Antigravity / `agy` helper
+
+The **Antigravity 网络** tab installs an optional PowerShell wrapper for `agy`. Proxy variables are set only while `agy` is running and are restored afterward, so Codex, Git, Python, npm, and the rest of the shell are not globally proxied. The PowerShell profile is backed up before edits and the hook can be removed from the GUI.
 
 ## Requirements
 

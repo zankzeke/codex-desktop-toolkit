@@ -1,5 +1,5 @@
 """
-codex_toolkit_gui.py — Codex Desktop 工具箱 GUI
+codex_toolkit_gui.py — Codex Bridge Toolkit GUI
 功能：
   - 会话修复：扫描并修复 codex++ 合成 ID，支持勾选批量修复
   - 代理控制：一键启动/停止本地 ID 修复代理，实时查看日志
@@ -21,13 +21,18 @@ from tkinter import messagebox, scrolledtext, ttk
 
 # ─── 路径配置 ──────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
+FROZEN = bool(getattr(sys, "frozen", False))
+APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).parent.resolve()
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+SCRIPT_DIR = APP_DIR
 CODEX_HOME = Path.home() / ".codex"
 SESSIONS_DIR = CODEX_HOME / "sessions"
 STATE_DB = CODEX_HOME / "state_5.sqlite"
 PROXY_SCRIPT = SCRIPT_DIR / "proxy.py"
+PROXY_EXE = APP_DIR / "CodexBridgeProxy.exe"
 VENV_PYTHON = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
 PYTHON_EXE = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+ASSETS_DIR = BUNDLE_DIR / "assets"
 
 CODEX_EXE_CANDIDATES = [
     Path.home() / "AppData" / "Local" / "OpenAI" / "Codex" / "Codex.exe",
@@ -39,6 +44,7 @@ CODEX_EXE_CANDIDATES = [
 from history_fixer import fix_rollout_file, fast_check_bad_ids, is_codex_running
 from config_manager import enable_proxy_config, disable_proxy_config
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
+from ui_theme import ThemeManager, APP_VERSION
 
 
 def load_thread_index():
@@ -133,21 +139,21 @@ def restart_codex():
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Codex Toolkit")
-        self.geometry("900x680")
+        self.title("Codex Bridge Toolkit")
+        self.geometry("1000x720")
+        self.minsize(860, 620)
         self.resizable(True, True)
-        self.configure(bg="#1e1e2e")
 
         self._proxy_proc: subprocess.Popen | None = None
         self._proxy_log_thread: threading.Thread | None = None
         self._sessions: list[dict] = []
 
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        self._apply_style(style)
+        self._theme_manager = ThemeManager(self, ASSETS_DIR)
+        self.palette = self._theme_manager.palette
+        self._theme_manager.build_header()
 
         nb = ttk.Notebook(self)
-        nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         self._session_tab = SessionTab(nb, self)
         self._proxy_tab = ProxyTab(nb, self)
@@ -159,6 +165,7 @@ class App(tk.Tk):
         nb.add(self._diag_tab, text="  🩺 运行诊断  ")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(0, self._theme_manager.refresh_widgets)
 
     def _apply_style(self, style: ttk.Style):
         bg = "#1e1e2e"
@@ -260,7 +267,7 @@ class SessionTab(ttk.Frame):
         self._restart_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bottom, text="修复后重启 Codex Desktop",
                         variable=self._restart_var).pack(side=tk.LEFT)
-        self._status_lbl = ttk.Label(bottom, text="就绪", foreground="#a6e3a1")
+        self._status_lbl = ttk.Label(bottom, text="就绪", foreground=self._app.palette["success"])
         self._status_lbl.pack(side=tk.RIGHT)
 
     def _on_click(self, event):
@@ -273,7 +280,7 @@ class SessionTab(ttk.Frame):
                 self._tree.set(item, "check", "☐" if current == "☑" else "☑")
 
     def _scan(self):
-        self._status_lbl.config(text="扫描中…", foreground="#fab387")
+        self._status_lbl.config(text="扫描中…", foreground=self._app.palette["warn"])
         self._scan_btn.config(state=tk.DISABLED)
         self.update()
 
@@ -306,13 +313,13 @@ class SessionTab(ttk.Frame):
             ))
 
         if not success:
-            self._status_lbl.config(text="❌ 扫描失败，请检查日志", foreground="#f38ba8")
+            self._status_lbl.config(text="❌ 扫描失败，请检查日志", foreground=self._app.palette["danger"])
         elif sessions:
             self._status_lbl.config(
-                text=f"找到 {len(sessions)} 个需要修复的会话", foreground="#fab387"
+                text=f"找到 {len(sessions)} 个需要修复的会话", foreground=self._app.palette["warn"]
             )
         else:
-            self._status_lbl.config(text="✅ 所有会话 ID 均正常，无需修复", foreground="#a6e3a1")
+            self._status_lbl.config(text="✅ 所有会话 ID 均正常，无需修复", foreground=self._app.palette["success"])
 
         self._scan_btn.config(state=tk.NORMAL)
 
@@ -371,7 +378,7 @@ class SessionTab(ttk.Frame):
         if not messagebox.askyesno("确认修复", preview_text):
             return
 
-        self._status_lbl.config(text="修复中…", foreground="#fab387")
+        self._status_lbl.config(text="修复中…", foreground=self._app.palette["warn"])
         self.update()
 
         def _do():
@@ -385,12 +392,12 @@ class SessionTab(ttk.Frame):
                 self._app.after(0, lambda: self._after_fix(total, drops, restart))
             except Exception as e:
                 self._app.after(0, lambda err=str(e): messagebox.showerror("修复错误", f"修复过程中出错:\n{err}"))
-                self._app.after(0, lambda: self._status_lbl.config(text="修复失败", foreground="#f38ba8"))
+                self._app.after(0, lambda: self._status_lbl.config(text="修复失败", foreground=self._app.palette["danger"]))
 
         threading.Thread(target=_do, daemon=True).start()
 
     def _after_fix(self, total_fixes: int, total_drops: int, do_restart: bool):
-        self._status_lbl.config(text=f"✅ 已修复 {total_fixes} 处，清理 {total_drops} 处", foreground="#a6e3a1")
+        self._status_lbl.config(text=f"✅ 已修复 {total_fixes} 处，清理 {total_drops} 处", foreground=self._app.palette["success"])
         # Refresh tree
         self._scan()
         if do_restart:
@@ -451,12 +458,12 @@ class ProxyTab(ttk.Frame):
         ctrl = ttk.Frame(self)
         ctrl.pack(fill=tk.X, padx=12, pady=6)
 
-        self._status_canvas = tk.Canvas(ctrl, width=14, height=14, bg="#1e1e2e",
+        self._status_canvas = tk.Canvas(ctrl, width=14, height=14, bg=self._app.palette["bg"],
                                         highlightthickness=0)
         self._status_canvas.pack(side=tk.LEFT, padx=(0, 6))
-        self._dot = self._status_canvas.create_oval(2, 2, 12, 12, fill="#6c7086", outline="")
+        self._dot = self._status_canvas.create_oval(2, 2, 12, 12, fill=self._app.palette["muted"], outline="")
 
-        self._status_lbl = ttk.Label(ctrl, text="未启动", foreground="#6c7086",
+        self._status_lbl = ttk.Label(ctrl, text="未启动", foreground=self._app.palette["muted"],
                                      font=("Segoe UI", 10, "bold"))
         self._status_lbl.pack(side=tk.LEFT)
 
@@ -474,15 +481,15 @@ class ProxyTab(ttk.Frame):
         log_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 10))
 
         self._log = scrolledtext.ScrolledText(
-            log_frame, bg="#181825", fg="#cdd6f4",
+            log_frame, bg=self._app.palette["surface"], fg=self._app.palette["fg"],
             font=("Consolas", 9), state=tk.DISABLED,
             relief=tk.FLAT, borderwidth=0,
         )
         self._log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self._log.tag_config("info", foreground="#89b4fa")
-        self._log.tag_config("warn", foreground="#fab387")
-        self._log.tag_config("error", foreground="#f38ba8")
-        self._log.tag_config("ok", foreground="#a6e3a1")
+        self._log.tag_config("info", foreground=self._app.palette["accent"])
+        self._log.tag_config("warn", foreground=self._app.palette["warn"])
+        self._log.tag_config("error", foreground=self._app.palette["danger"])
+        self._log.tag_config("ok", foreground=self._app.palette["success"])
 
         ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
             side=tk.RIGHT, padx=4, pady=4
@@ -510,20 +517,28 @@ class ProxyTab(ttk.Frame):
 
     def _set_running(self, running: bool):
         if running:
-            color = "#a6e3a1"
+            color = self._app.palette["success"]
             self._status_canvas.itemconfig(self._dot, fill=color)
             self._status_lbl.config(text=f"运行中  :{self._port_var.get()}", foreground=color)
             self._start_btn.config(state=tk.DISABLED)
             self._stop_btn.config(state=tk.NORMAL)
         else:
-            color = "#6c7086"
+            color = self._app.palette["muted"]
             self._status_canvas.itemconfig(self._dot, fill=color)
             self._status_lbl.config(text="未启动", foreground=color)
             self._start_btn.config(state=tk.NORMAL)
             self._stop_btn.config(state=tk.DISABLED)
 
     def _start_proxy(self):
-        if not PROXY_SCRIPT.exists():
+        if FROZEN:
+            if not PROXY_EXE.exists():
+                messagebox.showerror(
+                    "缺少代理组件",
+                    f"找不到 CodexBridgeProxy.exe：\n{PROXY_EXE}\n\n"
+                    "请使用 GitHub Release 的完整便携包，并保持两个 EXE 在同一目录。",
+                )
+                return
+        elif not PROXY_SCRIPT.exists():
             messagebox.showerror("错误", f"找不到 proxy.py：\n{PROXY_SCRIPT}")
             return
 
@@ -571,8 +586,11 @@ class ProxyTab(ttk.Frame):
             messagebox.showerror("错误", "端口必须是 1–65535 之间的整数")
             return
 
-        cmd = [
-            PYTHON_EXE, "-X", "utf8", str(PROXY_SCRIPT),
+        if FROZEN:
+            cmd = [str(PROXY_EXE)]
+        else:
+            cmd = [PYTHON_EXE, "-X", "utf8", str(PROXY_SCRIPT)]
+        cmd += [
             "--port", port,
             "--upstream", upstream,
             "--reasoning-mode", "safe",
@@ -719,7 +737,7 @@ class AgyTab(ttk.Frame):
         row1 = ttk.Frame(act)
         row1.pack(fill=tk.X, padx=10, pady=10)
         ttk.Label(row1, text="状态：").pack(side=tk.LEFT)
-        self._status_lbl = ttk.Label(row1, text="正在检查...", foreground="#cdd6f4")
+        self._status_lbl = ttk.Label(row1, text="正在检查...", foreground=self._app.palette["fg"])
         self._status_lbl.pack(side=tk.LEFT, padx=(0, 20))
 
         ttk.Button(row1, text="🚀 安装 agy 专属代理拦截器", command=self._install_hook, style="Accent.TButton").pack(side=tk.LEFT, padx=(0, 10))
@@ -732,9 +750,9 @@ class AgyTab(ttk.Frame):
 
     def _set_status(self, installed: bool):
         if installed:
-            self._status_lbl.config(text="✅ 已安装 (全局生效)", foreground="#a6e3a1")
+            self._status_lbl.config(text="✅ 已安装（agy 专属）", foreground=self._app.palette["success"])
         else:
-            self._status_lbl.config(text="❌ 未安装", foreground="#f38ba8")
+            self._status_lbl.config(text="❌ 未安装", foreground=self._app.palette["danger"])
 
     def _install_hook(self):
         proxy = self._proxy_var.get().strip()
@@ -773,7 +791,7 @@ class DiagnosticsTab(ttk.Frame):
         ttk.Button(top, text="🔄 刷新诊断", command=self._refresh).pack(side=tk.RIGHT)
 
         self._text = scrolledtext.ScrolledText(
-            self, bg="#181825", fg="#cdd6f4",
+            self, bg=self._app.palette["surface"], fg=self._app.palette["fg"],
             font=("Consolas", 10), state=tk.DISABLED,
             relief=tk.FLAT, borderwidth=0,
         )
