@@ -1,0 +1,132 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: v0.2.0
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
+    runs-on: windows-latest
+    env:
+      DEFAULT_TAG: v0.2.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Run tests before packaging
+        run: |
+          python -m compileall -q .
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q
+
+      - name: Build proxy executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile `
+            --name CodexBridgeProxy `
+            --icon assets/codex_bridge.ico `
+            proxy.py
+
+      - name: Build GUI executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name CodexBridgeToolkit `
+            --icon assets/codex_bridge.ico `
+            --add-data "assets;assets" `
+            codex_toolkit_gui.py
+
+      - name: Create portable package
+        id: package
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $tag = '${{ inputs.tag }}'
+          } else {
+            $tag = $env:DEFAULT_TAG
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          $version = $tag.TrimStart('v')
+          $dir = "release/CodexBridgeToolkit-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item dist/CodexBridgeToolkit.exe "$dir/CodexBridgeToolkit.exe"
+          Copy-Item dist/CodexBridgeProxy.exe "$dir/CodexBridgeProxy.exe"
+          Copy-Item README.md "$dir/README.md"
+          Copy-Item LICENSE "$dir/LICENSE"
+          @"
+          Codex Bridge Toolkit $tag
+
+          Start CodexBridgeToolkit.exe.
+          Keep CodexBridgeToolkit.exe and CodexBridgeProxy.exe in the same directory.
+
+          Features in this release:
+          - Multi-theme polished GUI and custom application icon
+          - Codex session synthetic-ID repair
+          - HTTP/SSE/WebSocket compatibility proxy
+          - Antigravity/agy PowerShell proxy helper
+          - Case-insensitive Codex process detection fix
+          "@ | Set-Content -Encoding utf8 "$dir/PORTABLE_README.txt"
+          Compress-Archive -Path "$dir/*" -DestinationPath "release/CodexBridgeToolkit-$version-windows-x64.zip" -Force
+          "zip=release/CodexBridgeToolkit-$version-windows-x64.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexBridgeToolkit-windows-x64
+          path: |
+            dist/CodexBridgeToolkit.exe
+            dist/CodexBridgeProxy.exe
+            ${{ steps.package.outputs.zip }}
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.package.outputs.tag }}'
+          $zip = '${{ steps.package.outputs.zip }}'
+          $version = $tag.TrimStart('v')
+          @"
+          ## Codex Bridge Toolkit $tag
+
+          Windows packaged release. No separate Python installation is required.
+
+          **Recommended:** download `CodexBridgeToolkit-$version-windows-x64.zip`, extract it, and keep both executables together.
+
+          ### Highlights
+          - New custom app icon and branded header
+          - Four persistent themes: 午夜蓝 / 石墨黑 / 深海蓝 / 明亮
+          - Windows title-bar tinting on supported systems
+          - Fixes case-sensitive `Codex.exe` process detection
+          - Session ID repair + HTTP/SSE/WebSocket compatibility proxy
+          - Antigravity / `agy` PowerShell proxy helper
+
+          This is an unofficial community project and is not affiliated with OpenAI.
+          "@ | Set-Content -Encoding utf8 release-notes.md
+
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $zip dist/CodexBridgeToolkit.exe dist/CodexBridgeProxy.exe --clobber
+          } else {
+            gh release create $tag $zip dist/CodexBridgeToolkit.exe dist/CodexBridgeProxy.exe `
+              --target $env:GITHUB_SHA `
+              --title "Codex Bridge Toolkit $tag" `
+              --notes-file release-notes.md
+          }
