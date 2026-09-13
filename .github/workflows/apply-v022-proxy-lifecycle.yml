@@ -1,0 +1,162 @@
+name: Apply v0.2.2 proxy lifecycle fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-v022-proxy-lifecycle.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Patch GUI lifecycle, docs metadata, and tests
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_exact(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(f'unexpected occurrence count in {path}: {old!r} -> {found}')
+              p.write_text(text.replace(old, new, count), encoding='utf-8', newline='\n')
+
+          gui = Path('codex_toolkit_gui.py')
+          text = gui.read_text(encoding='utf-8')
+
+          text = text.replace(
+              'from ui_theme import ThemeManager, APP_VERSION\n',
+              'from ui_theme import ThemeManager, APP_VERSION\n'
+              'from process_utils import (\n'
+              '    get_port_owner,\n'
+              '    is_packaged_toolkit_proxy,\n'
+              '    terminate_process_tree,\n'
+              '    wait_for_port_free,\n'
+              ')\n',
+              1,
+          )
+
+          text = text.replace(
+              '        self._sessions: list[dict] = []\n\n        self._theme_manager = ThemeManager(self, ASSETS_DIR)\n',
+              '        self._sessions: list[dict] = []\n'
+              '        self._closing = False\n\n'
+              '        self._theme_manager = ThemeManager(self, ASSETS_DIR)\n',
+              1,
+          )
+
+          old_close = '''    def _on_close(self):\n        if self._proxy_proc and self._proxy_proc.poll() is None:\n            self._proxy_proc.terminate()\n        self.destroy()\n'''
+          new_close = '''    def _on_close(self):\n        if self._closing:\n            return\n        self._closing = True\n        try:\n            # PyInstaller one-file executables can have a bootloader child.\n            # Stop the complete process tree before destroying the GUI so the\n            # local port is not left occupied after exit.\n            self._proxy_tab._stop_proxy(for_exit=True)\n        finally:\n            self.destroy()\n'''
+          if old_close not in text:
+              raise SystemExit('App._on_close block not found')
+          text = text.replace(old_close, new_close, 1)
+
+          old_proxy_row = '''        ttk.Label(row0, text="上游代理（科学上网）：").pack(side=tk.LEFT)\n        self._proxy_var = tk.StringVar(value="")\n        ttk.Entry(row0, textvariable=self._proxy_var, width=30).pack(side=tk.LEFT, padx=(0, 20))\n\n        ttk.Label(row0, text="上游地址：").pack(side=tk.LEFT)\n'''
+          new_proxy_row = '''        ttk.Label(row0, text="上游代理（科学上网）：").pack(side=tk.LEFT)\n        self._proxy_var = tk.StringVar(value="")\n        ttk.Entry(row0, textvariable=self._proxy_var, width=26).pack(side=tk.LEFT, padx=(0, 4))\n        ttk.Button(row0, text="示例", width=5, command=self._show_proxy_examples).pack(\n            side=tk.LEFT, padx=(0, 12)\n        )\n\n        ttk.Label(row0, text="上游地址：").pack(side=tk.LEFT)\n'''
+          if old_proxy_row not in text:
+              raise SystemExit('proxy input row block not found')
+          text = text.replace(old_proxy_row, new_proxy_row, 1)
+
+          anchor = '''    def _append_log(self, text: str, tag: str = ""):\n'''
+          helper = '''    def _show_proxy_examples(self):\n        messagebox.showinfo(\n            "常见上游代理地址",\n            "常见填写示例（实际端口以代理软件当前设置为准）：\\n\\n"\n            "Clash Verge Rev:  http://127.0.0.1:7897\\n"\n            "Clash / Mihomo:    http://127.0.0.1:7890\\n"\n            "v2rayN (HTTP):     http://127.0.0.1:10809\\n"\n            "NekoRay (HTTP):    http://127.0.0.1:2081\\n\\n"\n            "这里只填写 HTTP / Mixed 端口；8787 是 Toolkit 自己的本地端口。\\n"\n            "更多说明见仓库 docs/PROXY_SETUP_ZH.md。",\n        )\n\n'''
+          if anchor not in text:
+              raise SystemExit('_append_log anchor not found')
+          text = text.replace(anchor, helper + anchor, 1)
+
+          old_port_check = '''            from diagnostics import is_port_in_use\n            if is_port_in_use(port_num):\n                messagebox.showerror("端口被占用", f"端口 {port_num} 已经被占用，代理无法启动。")\n                return\n'''
+          new_port_check = '''            from diagnostics import is_port_in_use\n            if is_port_in_use(port_num):\n                owner_pid, owner_name = get_port_owner(port_num)\n                if owner_pid and is_packaged_toolkit_proxy(owner_name):\n                    if not messagebox.askyesno(\n                        "检测到遗留代理",\n                        f"端口 {port_num} 正被旧的 CodexBridgeProxy 进程占用。\\n\\n"\n                        f"PID: {owner_pid}\\n\\n"\n                        "这通常是上次关闭 Toolkit 时代理进程未完全退出导致的。\\n"\n                        "是否清理旧代理并重新启动？",\n                    ):\n                        return\n                    if not terminate_process_tree(owner_pid) or not wait_for_port_free(port_num):\n                        messagebox.showerror(\n                            "清理失败",\n                            f"无法停止占用端口 {port_num} 的旧代理。请在任务管理器中结束 CodexBridgeProxy.exe 后重试。",\n                        )\n                        return\n                    self._append_log(\n                        f"[清理] 已停止遗留 CodexBridgeProxy 进程 PID={owner_pid}", "warn"\n                    )\n                else:\n                    owner_text = f"（{owner_name or '未知进程'}，PID {owner_pid}）" if owner_pid else ""\n                    messagebox.showerror(\n                        "端口被占用",\n                        f"端口 {port_num} 已被其它进程占用{owner_text}，代理无法启动。",\n                    )\n                    return\n'''
+          if old_port_check not in text:
+              raise SystemExit('port-in-use block not found')
+          text = text.replace(old_port_check, new_port_check, 1)
+
+          old_health_loop = '''            for _ in range(20):\n                try:\n                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1):\n                        self._app.after(0, lambda: self._set_running(True))\n                        return\n                except:\n                    time.sleep(0.5)\n            self._app.after(0, lambda: self._append_log("[错误] 代理健康检查超时", "error"))\n            self._app.after(0, lambda: self._stop_proxy())\n'''
+          new_health_loop = '''            for _ in range(20):\n                if self._app._closing:\n                    return\n                try:\n                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1):\n                        if not self._app._closing:\n                            self._app.after(0, lambda: self._set_running(True))\n                        return\n                except Exception:\n                    time.sleep(0.5)\n            if self._app._closing:\n                return\n            self._app.after(0, lambda: self._append_log("[错误] 代理健康检查超时", "error"))\n            self._app.after(0, lambda: self._stop_proxy())\n'''
+          if old_health_loop not in text:
+              raise SystemExit('health polling block not found')
+          text = text.replace(old_health_loop, new_health_loop, 1)
+
+          old_read_tail = '''                self._app.after(0, lambda l=line, t=tag: self._append_log(l, t))\n            # Process ended\n            self._app.after(0, lambda: self._set_running(False))\n            self._app.after(0, lambda: self._append_log("[代理已停止]", "warn"))\n'''
+          new_read_tail = '''                if not self._app._closing:\n                    self._app.after(0, lambda l=line, t=tag: self._append_log(l, t))\n            # Process ended. Do not schedule Tk callbacks while the window is closing.\n            if not self._app._closing:\n                self._app.after(0, lambda: self._set_running(False))\n                self._app.after(0, lambda: self._append_log("[代理已停止]", "warn"))\n'''
+          if old_read_tail not in text:
+              raise SystemExit('proxy reader tail not found')
+          text = text.replace(old_read_tail, new_read_tail, 1)
+
+          old_stop = '''    def _stop_proxy(self):\n        proc = self._app._proxy_proc\n        if proc and proc.poll() is None:\n            proc.terminate()\n            self._app._proxy_proc = None\n        self._set_running(False)\n        self._append_log("[用户手动停止代理]", "warn")\n'''
+          new_stop = '''    def _stop_proxy(self, for_exit: bool = False):\n        proc = self._app._proxy_proc\n        if proc and proc.poll() is None:\n            pid = proc.pid\n            stopped = terminate_process_tree(pid)\n            if not stopped:\n                # Last-resort fallback for source-mode Python or unusual systems.\n                try:\n                    proc.kill()\n                    proc.wait(timeout=2)\n                    stopped = True\n                except Exception:\n                    stopped = False\n            else:\n                try:\n                    proc.wait(timeout=2)\n                except Exception:\n                    pass\n            self._app._proxy_proc = None\n            if not for_exit and not stopped:\n                messagebox.showwarning(\n                    "停止代理失败",\n                    "代理进程未能完全退出。再次启动时 Toolkit 会尝试清理遗留的 CodexBridgeProxy 进程。",\n                )\n        if not for_exit:\n            self._set_running(False)\n            self._append_log("[用户手动停止代理]", "warn")\n'''
+          if old_stop not in text:
+              raise SystemExit('_stop_proxy block not found')
+          text = text.replace(old_stop, new_stop, 1)
+
+          gui.write_text(text, encoding='utf-8', newline='\n')
+
+          replace_exact('ui_theme.py', 'APP_VERSION = "0.2.1"', 'APP_VERSION = "0.2.2"')
+          replace_exact(
+              'tests/test_gui_metadata.py',
+              "assert ui_theme.APP_VERSION == '0.2.1'",
+              "assert ui_theme.APP_VERSION == '0.2.2'",
+          )
+
+          readme = Path('README.md')
+          r = readme.read_text(encoding='utf-8')
+          r = r.replace(
+              '- Download `CodexBridgeToolkit-0.2.1-windows-x64.zip`.',
+              '- Download `CodexBridgeToolkit-0.2.2-windows-x64.zip`.',
+              1,
+          )
+          feature = '- Multi-theme GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.\n'
+          if feature in r and 'full proxy process tree' not in r:
+              r = r.replace(
+                  feature,
+                  feature + '- Closing the GUI stops the full packaged proxy process tree; stale `CodexBridgeProxy.exe` listeners can be detected and cleaned up on the next start.\n',
+                  1,
+              )
+          guide_anchor = '`-UpstreamProxy` is for an **HTTP proxy** supported by `aiohttp`.\n'
+          if guide_anchor in r and 'PROXY_SETUP_ZH.md' not in r:
+              r = r.replace(
+                  guide_anchor,
+                  guide_anchor + '\nChinese setup guide with common Clash Verge Rev / Clash / Mihomo / v2rayN / NekoRay examples: [docs/PROXY_SETUP_ZH.md](docs/PROXY_SETUP_ZH.md).\n',
+                  1,
+              )
+          readme.write_text(r, encoding='utf-8', newline='\n')
+
+          changelog = Path('CHANGELOG.md')
+          c = changelog.read_text(encoding='utf-8')
+          entry = '''## 0.2.2 - 2026-09-13\n\n- Fixed packaged proxy processes surviving after the GUI window closes.\n- Windows shutdown now terminates the complete PyInstaller proxy process tree.\n- Detects a stale `CodexBridgeProxy.exe` listener on the selected local port and offers to clean it up before restarting.\n- Added an in-GUI upstream proxy example dialog and `docs/PROXY_SETUP_ZH.md` for common Chinese proxy clients.\n- Portable ZIP now includes the upstream proxy setup guide.\n\n'''
+          if entry not in c:
+              c = c.replace('# Changelog\n\n', '# Changelog\n\n' + entry, 1)
+              changelog.write_text(c, encoding='utf-8', newline='\n')
+
+          Path('tests/test_process_utils.py').write_text('''from types import SimpleNamespace\n\nimport process_utils\n\n\ndef test_packaged_proxy_name_detection_is_case_insensitive():\n    assert process_utils.is_packaged_toolkit_proxy("CodexBridgeProxy")\n    assert process_utils.is_packaged_toolkit_proxy("codexbridgeproxy.exe")\n    assert not process_utils.is_packaged_toolkit_proxy("python")\n\n\ndef test_terminate_process_tree_uses_taskkill_tree_flag(monkeypatch):\n    calls = []\n\n    def fake_run(cmd, **kwargs):\n        calls.append(cmd)\n        return SimpleNamespace(returncode=0, stdout="SUCCESS")\n\n    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)\n    monkeypatch.setattr(process_utils, "get_process_name", lambda pid: None)\n    assert process_utils.terminate_process_tree(1234) is True\n    assert calls[0] == ["taskkill", "/PID", "1234", "/T", "/F"]\n\n\ndef test_wait_for_port_free(monkeypatch):\n    states = iter([4321, None])\n    monkeypatch.setattr(process_utils, "get_listening_pid", lambda port: next(states))\n    monkeypatch.setattr(process_utils.time, "sleep", lambda seconds: None)\n    assert process_utils.wait_for_port_free(8787, timeout=1) is True\n''', encoding='utf-8', newline='\n')
+
+          Path('tests/test_gui_proxy_lifecycle.py').write_text('''from pathlib import Path\n\n\ndef test_gui_closes_full_proxy_tree_and_handles_stale_proxy():\n    text = Path("codex_toolkit_gui.py").read_text(encoding="utf-8")\n    assert "self._proxy_tab._stop_proxy(for_exit=True)" in text\n    assert "terminate_process_tree(pid)" in text\n    assert "is_packaged_toolkit_proxy(owner_name)" in text\n    assert "wait_for_port_free(port_num)" in text\n    assert "常见上游代理地址" in text\n''', encoding='utf-8', newline='\n')
+          '@ | python -
+
+      - name: Validate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q .
+          python -m pytest -q
+
+      - name: Commit v0.2.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex_toolkit_gui.py process_utils.py ui_theme.py README.md CHANGELOG.md docs/PROXY_SETUP_ZH.md tests/test_gui_metadata.py tests/test_process_utils.py tests/test_gui_proxy_lifecycle.py
+          git commit -m "fix: proxy lifecycle cleanup and setup guide v0.2.2 [release]"
+          git push origin HEAD:main
