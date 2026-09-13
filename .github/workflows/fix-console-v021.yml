@@ -82,6 +82,7 @@ jobs:
           )
 
           replace_exact('ui_theme.py', 'APP_VERSION = "0.2.0"', 'APP_VERSION = "0.2.1"', 1)
+          replace_exact('tests/test_gui_metadata.py', "assert ui_theme.APP_VERSION == '0.2.0'", "assert ui_theme.APP_VERSION == '0.2.1'", 1)
           replace_exact('.github/workflows/release.yml', 'default: v0.2.0', 'default: v0.2.1', 1)
           replace_exact('.github/workflows/release.yml', 'DEFAULT_TAG: v0.2.0', 'DEFAULT_TAG: v0.2.1', 1)
           replace_exact(
