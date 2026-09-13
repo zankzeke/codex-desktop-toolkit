@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 - 2026-09-13
+
+- Fixed packaged proxy processes surviving after the GUI window closes.
+- Windows shutdown now terminates the complete PyInstaller proxy process tree.
+- Detects a stale `CodexBridgeProxy.exe` listener on the selected local port and offers to clean it up before restarting.
+- Added an in-GUI upstream proxy example dialog and `docs/PROXY_SETUP_ZH.md` for common Chinese proxy clients.
+- Portable ZIP now includes the upstream proxy setup guide.
+
 ## 0.2.1 - 2026-09-13
 
 - Fixed garbled/mojibake characters in the packaged Windows proxy console.

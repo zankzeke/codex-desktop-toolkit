@@ -45,6 +45,12 @@ from history_fixer import fix_rollout_file, fast_check_bad_ids, is_codex_running
 from config_manager import enable_proxy_config, disable_proxy_config
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
 from ui_theme import ThemeManager, APP_VERSION
+from process_utils import (
+    get_port_owner,
+    is_packaged_toolkit_proxy,
+    terminate_process_tree,
+    wait_for_port_free,
+)
 
 
 def load_thread_index():
@@ -147,6 +153,7 @@ class App(tk.Tk):
         self._proxy_proc: subprocess.Popen | None = None
         self._proxy_log_thread: threading.Thread | None = None
         self._sessions: list[dict] = []
+        self._closing = False
 
         self._theme_manager = ThemeManager(self, ASSETS_DIR)
         self.palette = self._theme_manager.palette
@@ -207,9 +214,16 @@ class App(tk.Tk):
                          font=("Segoe UI", 10, "bold"))
 
     def _on_close(self):
-        if self._proxy_proc and self._proxy_proc.poll() is None:
-            self._proxy_proc.terminate()
-        self.destroy()
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            # PyInstaller one-file executables can have a bootloader child.
+            # Stop the complete process tree before destroying the GUI so the
+            # local port is not left occupied after exit.
+            self._proxy_tab._stop_proxy(for_exit=True)
+        finally:
+            self.destroy()
 
 
 class SessionTab(ttk.Frame):
@@ -433,7 +447,10 @@ class ProxyTab(ttk.Frame):
 
         ttk.Label(row0, text="上游代理（科学上网）：").pack(side=tk.LEFT)
         self._proxy_var = tk.StringVar(value="")
-        ttk.Entry(row0, textvariable=self._proxy_var, width=30).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Entry(row0, textvariable=self._proxy_var, width=26).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(row0, text="示例", width=5, command=self._show_proxy_examples).pack(
+            side=tk.LEFT, padx=(0, 12)
+        )
 
         ttk.Label(row0, text="上游地址：").pack(side=tk.LEFT)
         self._upstream_var = tk.StringVar(value="https://chatgpt.com/backend-api/codex")
@@ -493,6 +510,18 @@ class ProxyTab(ttk.Frame):
 
         ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
             side=tk.RIGHT, padx=4, pady=4
+        )
+
+    def _show_proxy_examples(self):
+        messagebox.showinfo(
+            "常见上游代理地址",
+            "常见填写示例（实际端口以代理软件当前设置为准）：\n\n"
+            "Clash Verge Rev:  http://127.0.0.1:7897\n"
+            "Clash / Mihomo:    http://127.0.0.1:7890\n"
+            "v2rayN (HTTP):     http://127.0.0.1:10809\n"
+            "NekoRay (HTTP):    http://127.0.0.1:2081\n\n"
+            "这里只填写 HTTP / Mixed 端口；8787 是 Toolkit 自己的本地端口。\n"
+            "更多说明见仓库 docs/PROXY_SETUP_ZH.md。",
         )
 
     def _append_log(self, text: str, tag: str = ""):
@@ -580,8 +609,32 @@ class ProxyTab(ttk.Frame):
                 raise ValueError
             from diagnostics import is_port_in_use
             if is_port_in_use(port_num):
-                messagebox.showerror("端口被占用", f"端口 {port_num} 已经被占用，代理无法启动。")
-                return
+                owner_pid, owner_name = get_port_owner(port_num)
+                if owner_pid and is_packaged_toolkit_proxy(owner_name):
+                    if not messagebox.askyesno(
+                        "检测到遗留代理",
+                        f"端口 {port_num} 正被旧的 CodexBridgeProxy 进程占用。\n\n"
+                        f"PID: {owner_pid}\n\n"
+                        "这通常是上次关闭 Toolkit 时代理进程未完全退出导致的。\n"
+                        "是否清理旧代理并重新启动？",
+                    ):
+                        return
+                    if not terminate_process_tree(owner_pid) or not wait_for_port_free(port_num):
+                        messagebox.showerror(
+                            "清理失败",
+                            f"无法停止占用端口 {port_num} 的旧代理。请在任务管理器中结束 CodexBridgeProxy.exe 后重试。",
+                        )
+                        return
+                    self._append_log(
+                        f"[清理] 已停止遗留 CodexBridgeProxy 进程 PID={owner_pid}", "warn"
+                    )
+                else:
+                    owner_text = f"（{owner_name or '未知进程'}，PID {owner_pid}）" if owner_pid else ""
+                    messagebox.showerror(
+                        "端口被占用",
+                        f"端口 {port_num} 已被其它进程占用{owner_text}，代理无法启动。",
+                    )
+                    return
         except ValueError:
             messagebox.showerror("错误", "端口必须是 1–65535 之间的整数")
             return
@@ -629,12 +682,17 @@ class ProxyTab(ttk.Frame):
         def _poll_health():
             import urllib.request, time
             for _ in range(20):
+                if self._app._closing:
+                    return
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1):
-                        self._app.after(0, lambda: self._set_running(True))
+                        if not self._app._closing:
+                            self._app.after(0, lambda: self._set_running(True))
                         return
-                except:
+                except Exception:
                     time.sleep(0.5)
+            if self._app._closing:
+                return
             self._app.after(0, lambda: self._append_log("[错误] 代理健康检查超时", "error"))
             self._app.after(0, lambda: self._stop_proxy())
 
@@ -652,22 +710,44 @@ class ProxyTab(ttk.Frame):
                     tag = "error"
                 elif "200" in line or "ok" in line.lower() or "✅" in line:
                     tag = "ok"
-                self._app.after(0, lambda l=line, t=tag: self._append_log(l, t))
-            # Process ended
-            self._app.after(0, lambda: self._set_running(False))
-            self._app.after(0, lambda: self._append_log("[代理已停止]", "warn"))
+                if not self._app._closing:
+                    self._app.after(0, lambda l=line, t=tag: self._append_log(l, t))
+            # Process ended. Do not schedule Tk callbacks while the window is closing.
+            if not self._app._closing:
+                self._app.after(0, lambda: self._set_running(False))
+                self._app.after(0, lambda: self._append_log("[代理已停止]", "warn"))
 
         t = threading.Thread(target=_read, daemon=True)
         t.start()
         self._app._proxy_log_thread = t
 
-    def _stop_proxy(self):
+    def _stop_proxy(self, for_exit: bool = False):
         proc = self._app._proxy_proc
         if proc and proc.poll() is None:
-            proc.terminate()
+            pid = proc.pid
+            stopped = terminate_process_tree(pid)
+            if not stopped:
+                # Last-resort fallback for source-mode Python or unusual systems.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    stopped = True
+                except Exception:
+                    stopped = False
+            else:
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
             self._app._proxy_proc = None
-        self._set_running(False)
-        self._append_log("[用户手动停止代理]", "warn")
+            if not for_exit and not stopped:
+                messagebox.showwarning(
+                    "停止代理失败",
+                    "代理进程未能完全退出。再次启动时 Toolkit 会尝试清理遗留的 CodexBridgeProxy 进程。",
+                )
+        if not for_exit:
+            self._set_running(False)
+            self._append_log("[用户手动停止代理]", "warn")
 
     def _restart_codex(self):
         if not messagebox.askyesno("重启确认", "确认关闭并重新启动 Codex Desktop？"):

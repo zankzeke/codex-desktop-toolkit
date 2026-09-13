@@ -29,6 +29,7 @@ The toolkit provides both an **offline JSONL fixer** and a **local live proxy** 
 - `config.toml` editing through `tomlkit`, with automatic backups and provider restore support.
 - Offline session backups and atomic replacement.
 - Multi-theme GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.
+- Closing the GUI stops the full packaged proxy process tree; stale `CodexBridgeProxy.exe` listeners can be detected and cleaned up on the next start.
 - Optional PowerShell `agy` wrapper that temporarily sets proxy variables and restores the original shell environment afterward.
 
 ## Architecture
@@ -60,7 +61,7 @@ The official Codex source currently defines the same ChatGPT Codex base URL. Thi
 For most Windows users, use the packaged build from **GitHub Releases**:
 
 - [Latest Release](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
-- Download `CodexBridgeToolkit-0.2.1-windows-x64.zip`.
+- Download `CodexBridgeToolkit-0.2.2-windows-x64.zip`.
 - Extract it and keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same folder.
 - Start `CodexBridgeToolkit.exe`.
 
@@ -130,6 +131,8 @@ Optional examples:
 ```
 
 `-UpstreamProxy` is for an **HTTP proxy** supported by `aiohttp`.
+
+Chinese setup guide with common Clash Verge Rev / Clash / Mihomo / v2rayN / NekoRay examples: [docs/PROXY_SETUP_ZH.md](docs/PROXY_SETUP_ZH.md).
 
 ### CLI offline fixer
 
