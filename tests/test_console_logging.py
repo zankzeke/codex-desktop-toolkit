@@ -5,7 +5,7 @@ def test_proxy_runtime_log_markers_are_ascii_safe():
     text = Path("proxy.py").read_text(encoding="utf-8")
     required = [
         "%(name)s | %(message)s",
-        "[OUT] %s %s",
+        "[OUT] %s route=%s",
         "[IN ] upstream status",
         "[WS ] connect ->",
         "[WS ] upstream established; accepting client",

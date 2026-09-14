@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from aiohttp import ClientSession, WSMsgType, web
 
 from proxy import CodexProxy, make_app
@@ -8,9 +10,15 @@ from proxy import CodexProxy, make_app
 
 def test_url_mapping_and_masking():
     p = CodexProxy("https://chatgpt.com/backend-api/codex", "safe", 8787)
-    assert p._build_upstream_url("/v1/responses?x=1") == "https://chatgpt.com/backend-api/codex/responses?x=1"
+    assert p._build_upstream_url("/v1/responses") == "https://chatgpt.com/backend-api/codex/responses"
+    assert p._build_upstream_url("/v1/models") == "https://chatgpt.com/backend-api/codex/models"
+    assert p._build_upstream_url("/v1/responses/compact") == "https://chatgpt.com/backend-api/codex/responses/compact"
     p2 = CodexProxy("https://api.openai.com/v1", "safe", 8787)
     assert p2._build_upstream_url("/v1/responses") == "https://api.openai.com/v1/responses"
+    p3 = CodexProxy("http://127.0.0.1:9999", "safe", 8787)
+    assert p3._build_upstream_url("/v1/responses") == "http://127.0.0.1:9999/v1/responses"
+    with pytest.raises(ValueError):
+        p._build_upstream_url("/v1/anything-else")
     assert p._mask_url("https://user:secret@example.com/path?token=abc#x") == "https://***:***@example.com/path"
 
 
@@ -126,6 +134,41 @@ def test_concurrent_sse_streams_keep_rewrite_state_isolated():
                 )
                 assert a == "msg_dddddddddddddddd"
                 assert b == "fc_dddddddddddddddd"
+        finally:
+            await runner.cleanup()
+            await upstream_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_unknown_proxy_endpoint_is_rejected_without_contacting_upstream():
+    async def scenario():
+        hits = 0
+        upstream = web.Application()
+
+        async def catch_all(request):
+            nonlocal hits
+            hits += 1
+            return web.Response(text="unexpected")
+
+        upstream.router.add_route("*", "/{path_info:.*}", catch_all)
+        upstream_runner = web.AppRunner(upstream)
+        await upstream_runner.setup()
+        upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0)
+        await upstream_site.start()
+        upstream_port = upstream_site._server.sockets[0].getsockname()[1]
+
+        app = make_app(f"http://127.0.0.1:{upstream_port}", "safe", 0)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with ClientSession() as session:
+                async with session.get(f"http://127.0.0.1:{port}/not-a-codex-endpoint?next=http://example.invalid") as resp:
+                    assert resp.status == 404
+            assert hits == 0
         finally:
             await runner.cleanup()
             await upstream_runner.cleanup()

@@ -15,7 +15,7 @@ Codex Bridge Toolkit uses several independent controls for source and Windows re
 Install a current GitHub CLI, download a release artifact, then run:
 
 ```powershell
-gh attestation verify .\CodexBridgeToolkit-0.4.3-windows-x64.zip --repo zankzeke/codex-desktop-toolkit
+gh attestation verify .\CodexBridgeToolkit-<version>-windows-x64.zip --repo zankzeke/codex-desktop-toolkit
 ```
 
 The same command can verify the individual executables:
@@ -34,7 +34,7 @@ Download `SHA256SUMS.txt` from the same GitHub Release, then compare hashes with
 ```powershell
 Get-FileHash .\CodexBridgeToolkit.exe -Algorithm SHA256
 Get-FileHash .\CodexBridgeProxy.exe -Algorithm SHA256
-Get-FileHash .\CodexBridgeToolkit-0.4.3-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\CodexBridgeToolkit-<version>-windows-x64.zip -Algorithm SHA256
 ```
 
 The resulting hashes should match the entries in `SHA256SUMS.txt` exactly.
