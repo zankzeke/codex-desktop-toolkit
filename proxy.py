@@ -8,8 +8,8 @@ Usage
 What it does
 ------------
 1.  Listens on 127.0.0.1:<port> only (never 0.0.0.0).
-2.  Forwards every request to the official OpenAI / ChatGPT Codex backend,
-    passing Authorization / Cookie / other auth headers verbatim.
+2.  Forwards a small allowlist of Codex API endpoints to the configured
+    upstream, passing Authorization / Cookie / other auth headers verbatim.
 3.  Before forwarding a POST /v1/responses request, rewrites the ``input``
     array to fix malformed IDs produced by codex++ in previous sessions.
 4.  After receiving the upstream response:
@@ -133,6 +133,27 @@ def _is_responses_path(path: str) -> bool:
     return path.rstrip("/") == "/v1/responses"
 
 
+# Only Codex endpoints required by the Responses provider are forwarded.
+# Incoming request data chooses between these literal routes; it is never
+# concatenated into the upstream URL. This keeps the upstream origin and path
+# under local configuration control and prevents partial-SSRF via request
+# targets. The third tuple element preserves /v1 for generic custom upstreams.
+_FORWARD_ROUTES: dict[str, tuple[str, str, str]] = {
+    "/responses": ("responses", "/responses", "/responses"),
+    "/v1/responses": ("responses", "/responses", "/v1/responses"),
+    "/responses/compact": ("responses-compact", "/responses/compact", "/responses/compact"),
+    "/v1/responses/compact": ("responses-compact", "/responses/compact", "/v1/responses/compact"),
+    "/models": ("models", "/models", "/models"),
+    "/v1/models": ("models", "/models", "/v1/models"),
+}
+
+
+def _resolve_forward_route(path: str) -> tuple[str, str, str] | None:
+    """Resolve a request path to a literal, approved upstream route."""
+    canonical = path.rstrip("/") or "/"
+    return _FORWARD_ROUTES.get(canonical)
+
+
 # ---------------------------------------------------------------------------
 # Request body sanitiser
 # ---------------------------------------------------------------------------
@@ -194,18 +215,25 @@ class CodexProxy:
         except Exception:
             return "<redacted-url>"
 
-    def _build_upstream_url(self, raw_path: str) -> str:
-        """Map a local request path onto the configured upstream base URL."""
+    def _build_upstream_url(self, local_path: str) -> str:
+        """Map an approved local path onto the configured upstream base URL.
+
+        ``local_path`` selects one of a finite set of literal suffixes. Query
+        parameters are deliberately not accepted here; callers pass them via
+        aiohttp's ``params=`` argument instead of splicing request text into
+        the URL.
+        """
+        route = _resolve_forward_route(local_path)
+        if route is None:
+            raise ValueError("unsupported proxy endpoint")
+        _label, stripped_suffix, full_suffix = route
         parsed = urlsplit(self.upstream_base)
-        path = raw_path
-        # ChatGPT Codex backend expects /responses rather than /v1/responses.
-        # Also avoid doubling /v1 for API-style custom bases such as
-        # https://api.openai.com/v1.
-        if path.startswith("/v1/") and (
-            parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")
-        ):
-            path = path[3:]
-        return self.upstream_base.rstrip("/") + path
+        suffix = (
+            stripped_suffix
+            if parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")
+            else full_suffix
+        )
+        return self.upstream_base.rstrip("/") + suffix
 
     async def startup(self) -> None:
         connector = aiohttp.TCPConnector(ssl=True)
@@ -259,10 +287,15 @@ class CodexProxy:
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse:
         assert self._session is not None
 
-        path = request.raw_path  # includes query string
+        local_path = request.path  # decoded path only; query is forwarded separately
+        route = _resolve_forward_route(local_path)
+        if route is None:
+            self.stats.record_error(404, "unsupported proxy endpoint")
+            return web.Response(status=404, text="Unsupported proxy endpoint")
+        route_label = route[0]  # selected from literal allowlist, safe for logs
         transport = "websocket" if request.headers.get("Upgrade", "").lower() == "websocket" else "http"
-        self.stats.record_request(request.method, path, transport)
-        upstream_url = self._build_upstream_url(path)
+        self.stats.record_request(request.method, local_path, transport)
+        upstream_url = self._build_upstream_url(local_path)
 
         # ---- Build forwarded headers ----
         fwd_headers: dict[str, str] = {}
@@ -305,20 +338,21 @@ class CodexProxy:
 
         if msg_fixes or reasoning_drops:
             logger.info(
-                "[OUT] %s %s | msg-id fixes: %d | reasoning drops: %d",
+                "[OUT] %s route=%s | msg-id fixes: %d | reasoning drops: %d",
                 request.method,
-                path.split("?")[0],
+                route_label,
                 msg_fixes,
                 reasoning_drops,
             )
         else:
-            logger.info("[OUT] %s %s -> %s", request.method, path.split("?")[0], self._mask_url(upstream_url))
+            logger.info("[OUT] %s route=%s -> configured upstream", request.method, route_label)
 
         # ---- Forward to upstream ----
         try:
             upstream_resp = await self._session.request(
                 method=request.method,
                 url=upstream_url,
+                params=request.query,
                 headers=fwd_headers,
                 data=body_bytes if body_bytes else None,
                 allow_redirects=False,
@@ -330,7 +364,7 @@ class CodexProxy:
             return web.Response(status=502, text="Proxy upstream connection failed")
 
         self.stats.record_response(upstream_resp.status)
-        logger.info("[IN ] upstream status: %d (url: %s)", upstream_resp.status, self._mask_url(upstream_url))
+        logger.info("[IN ] upstream status: %d (route=%s)", upstream_resp.status, route_label)
 
         # ---- Build response headers ----
         resp_headers: dict[str, str] = {}
@@ -344,7 +378,7 @@ class CodexProxy:
         # ---- SSE streaming path ----
         if is_sse:
             self.stats.record_sse()
-            return await self._stream_sse(request, upstream_resp, resp_headers, path)
+            return await self._stream_sse(request, upstream_resp, resp_headers, local_path)
 
         # ---- Non-streaming path ----
         resp_body = await upstream_resp.read()
@@ -392,7 +426,7 @@ class CodexProxy:
             elif not kl.startswith("sec-websocket-") and kl not in ("connection", "upgrade", "host"):
                 fwd_headers[k] = v
 
-        logger.info("[WS ] connect -> %s", self._mask_url(upstream_url))
+        logger.info("[WS ] connect -> configured upstream")
         id_map: dict[str, str] = {}
         ws_close_code: int | None = None
         ws_counted = False
@@ -401,6 +435,7 @@ class CodexProxy:
             assert self._session is not None
             async with self._session.ws_connect(
                 upstream_url,
+                params=request.query,
                 headers=fwd_headers,
                 protocols=ws_protocols,
                 proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,
