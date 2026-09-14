@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3 - 2026-09-14
+
+- Added CodeQL Python security scanning on pushes, pull requests, and a weekly schedule using the current CodeQL Action v4.
+- Added Dependabot version updates for Python dependencies and GitHub Actions, with grouped minor/patch updates.
+- Added GitHub/Sigstore SLSA build provenance attestations for Windows release EXEs, the portable ZIP, and `SHA256SUMS.txt`.
+- Release workflow now grants the OIDC/attestation permissions required to produce verifiable provenance and documents `gh attestation verify` usage.
+- Existing exact release dependency locking, packaged EXE smoke tests, SHA256 checksums, and optional Authenticode signing remain in place.
+
 ## 0.4.2 - 2026-09-14
 
 - Added `version.py` as the single authoritative version source for GUI and Release packaging.
@@ -95,4 +103,3 @@ Initial public release.
 - Optional PowerShell `agy` proxy wrapper with environment restoration.
 - Windows CI and regression/integration tests.
 - Final public source assembly verified against the reviewed release files.
-

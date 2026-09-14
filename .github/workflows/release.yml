@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Optional tag; must match version.py (for example v0.4.2)
+        description: Optional tag; must match version.py (for example v0.4.3)
         required: false
         default: ''
   push:
@@ -14,6 +14,9 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: windows-release
@@ -94,7 +97,7 @@ jobs:
           SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
         run: |
           if (-not $env:SIGN_CERT) {
-            Write-Host "Signing secrets are not configured; publishing unsigned binaries with SHA256SUMS."
+            Write-Host "Signing secrets are not configured; publishing unsigned binaries with SHA256SUMS and GitHub provenance attestations."
             exit 0
           }
           [IO.File]::WriteAllBytes("signing.pfx", [Convert]::FromBase64String($env:SIGN_CERT))
@@ -126,14 +129,15 @@ jobs:
           Start CodexBridgeToolkit.exe.
           Keep CodexBridgeToolkit.exe and CodexBridgeProxy.exe in the same directory.
 
-          v0.4.2 hardening:
-          - Single authoritative version source
-          - Locked Windows release dependency set
+          Release security:
+          - Exact locked Windows release dependency set
           - Packaged Proxy + GUI smoke tests before publishing
-          - Exact Responses endpoint detection
-          - Two-phase ID repair including forward references
-          - Correct WebSocket reconnect telemetry for parallel connections
-          - SHA256 checksums and optional Authenticode signing
+          - SHA256SUMS.txt integrity hashes
+          - GitHub/Sigstore SLSA build provenance attestations for released artifacts
+          - Optional Authenticode signing when maintainer signing secrets are configured
+
+          Verify provenance after downloading with:
+            gh attestation verify <file> --repo zankzeke/codex-desktop-toolkit
           "@ | Set-Content -Encoding utf8 "$dir/PORTABLE_README.txt"
           $zip = "release/CodexBridgeToolkit-$version-windows-x64.zip"
           Compress-Archive -Path "$dir/*" -DestinationPath $zip -Force
@@ -152,6 +156,16 @@ jobs:
             "$hash  $([IO.Path]::GetFileName($file))"
           }
           $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
+
+      - name: Generate GitHub build provenance attestations
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/CodexBridgeToolkit.exe
+            dist/CodexBridgeProxy.exe
+            ${{ steps.package.outputs.zip }}
+            release/SHA256SUMS.txt
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -178,15 +192,18 @@ jobs:
 
           **Recommended:** download `CodexBridgeToolkit-$version-windows-x64.zip`, extract it, and keep both executables together.
 
-          ### v0.4.2 Repository & Release Hardening
-          - Single version source shared by GUI and release pipeline
-          - Exact locked release/build dependencies
-          - Packaged GUI smoke test in addition to HTTP/SSE/WebSocket proxy smoke tests
-          - Behavior-focused regression tests for the new hardening paths
-          - Correct WebSocket reconnect telemetry with parallel connections
-          - Exact `/v1/responses` matching rather than substring matching
-          - Two-phase ID repair for forward references, including cross-line JSONL history repair
-          - SHA256 integrity file remains included; Authenticode is used when signing secrets are configured
+          ### Supply-chain security
+          - CodeQL scans the Python source on pushes, pull requests, and a weekly schedule.
+          - Dependabot tracks Python and GitHub Actions dependency updates.
+          - Release/build dependencies are locked exactly in `requirements-release.txt`.
+          - Both packaged executables are smoke-tested before publication.
+          - `SHA256SUMS.txt` is included for integrity checks.
+          - GitHub/Sigstore SLSA build provenance is generated for both EXEs, the portable ZIP, and the checksum file.
+          - Authenticode signing is applied when maintainer signing secrets are configured.
+
+          Verify a downloaded artifact with GitHub CLI:
+
+          `gh attestation verify <downloaded-file> --repo zankzeke/codex-desktop-toolkit`
 
           Privacy note: runtime stats are local-only and do not store authentication headers, cookies, request/response bodies, or URL query strings.
 
