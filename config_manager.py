@@ -15,7 +15,7 @@ from history_fixer import backup_file
 CODEX_HOME = Path.home() / ".codex"
 CONFIG_PATH = CODEX_HOME / "config.toml"
 STATE_PATH = Path.home() / ".codex-toolkit" / "state.json"
-ENV_PROXY_SENTINEL = "__SYSTEM_ENV__"
+ENV_PROXY_SENTINEL = "系统环境代理"
 
 
 def _load_state() -> dict:

@@ -61,6 +61,7 @@ from aiohttp import web
 
 from id_rewriter import sanitise_input_array, rewrite_response_object
 from sse_handler import SSELineBuffer, rewrite_sse_line
+from runtime_stats import RuntimeStats
 
 # ---------------------------------------------------------------------------
 # Logging setup — SAFE: no auth or body data
@@ -157,11 +158,13 @@ def _sanitise_request_body(
 
 
 class CodexProxy:
-    def __init__(self, upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None) -> None:
+    def __init__(self, upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None, proxy_mode: str = "direct") -> None:
         self.upstream_base = upstream_base.rstrip("/")
         self.reasoning_mode = reasoning_mode
         self.port = port
         self.upstream_proxy = upstream_proxy
+        self.proxy_mode = proxy_mode
+        self.stats = RuntimeStats()
         self._session: aiohttp.ClientSession | None = None
 
     def _mask_url(self, url: str | None) -> str | None:
@@ -201,10 +204,11 @@ class CodexProxy:
             # Do not follow redirects automatically — let client handle them.
             # Timeouts: 30s connect, no total timeout (SSE streams can be long).
             timeout=aiohttp.ClientTimeout(connect=30, total=None),
-            trust_env=True,
+            trust_env=self.proxy_mode == "env",
         )
         logger.info("Upstream: %s", self._mask_url(self.upstream_base))
-        if self.upstream_proxy:
+        logger.info("Proxy mode: %s", self.proxy_mode)
+        if self.proxy_mode == "explicit" and self.upstream_proxy:
             logger.info("Upstream Proxy: %s", self._mask_url(self.upstream_proxy))
         logger.info("Reasoning mode: %s", self.reasoning_mode)
 
@@ -225,7 +229,8 @@ class CodexProxy:
             "upstream": self._mask_url(self.upstream_base),
             "websocket_supported": True,
             "reasoning_mode": self.reasoning_mode,
-            "upstream_proxy": self._mask_url(self.upstream_proxy),
+            "proxy_mode": self.proxy_mode,
+            "upstream_proxy": self._mask_url(self.upstream_proxy) if self.proxy_mode == "explicit" else None,
             "env_proxies": {
                 "http_proxy": self._mask_url(os.environ.get("HTTP_PROXY")),
                 "https_proxy": self._mask_url(os.environ.get("HTTPS_PROXY")),
@@ -233,6 +238,9 @@ class CodexProxy:
                 "no_proxy": os.environ.get("NO_PROXY")
             }
         })
+
+    async def handle_stats(self, request: web.Request) -> web.Response:
+        return web.json_response(self.stats.snapshot())
 
     # ------------------------------------------------------------------ #
     # Main proxy catch-all                                                 #
@@ -242,6 +250,8 @@ class CodexProxy:
         assert self._session is not None
 
         path = request.raw_path  # includes query string
+        transport = "websocket" if request.headers.get("Upgrade", "").lower() == "websocket" else "http"
+        self.stats.record_request(request.method, path, transport)
         upstream_url = self._build_upstream_url(path)
 
         # ---- Build forwarded headers ----
@@ -281,6 +291,8 @@ class CodexProxy:
                 )
                 body_bytes = json.dumps(body_obj, ensure_ascii=False).encode()
 
+        self.stats.record_rewrite(msg_fixes, reasoning_drops)
+
         if msg_fixes or reasoning_drops:
             logger.info(
                 "[OUT] %s %s | msg-id fixes: %d | reasoning drops: %d",
@@ -300,12 +312,14 @@ class CodexProxy:
                 headers=fwd_headers,
                 data=body_bytes if body_bytes else None,
                 allow_redirects=False,
-                proxy=self.upstream_proxy,
+                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,
             )
         except aiohttp.ClientError as exc:
+            self.stats.record_error(502, "connection failed")
             logger.error("Upstream connection error: %s", type(exc).__name__)
             return web.Response(status=502, text="Proxy upstream connection failed")
 
+        self.stats.record_response(upstream_resp.status)
         logger.info("[IN ] upstream status: %d (url: %s)", upstream_resp.status, self._mask_url(upstream_url))
 
         # ---- Build response headers ----
@@ -319,10 +333,18 @@ class CodexProxy:
 
         # ---- SSE streaming path ----
         if is_sse:
+            self.stats.record_sse()
             return await self._stream_sse(request, upstream_resp, resp_headers, path)
 
         # ---- Non-streaming path ----
         resp_body = await upstream_resp.read()
+        if upstream_resp.status >= 400 and resp_body:
+            try:
+                err_obj = json.loads(resp_body)
+                err_val = err_obj.get("error", err_obj) if isinstance(err_obj, dict) else err_obj
+                self.stats.record_error(upstream_resp.status, str(err_val))
+            except Exception:
+                pass
         if is_responses_endpoint and resp_body:
             try:
                 resp_obj = json.loads(resp_body)
@@ -361,6 +383,8 @@ class CodexProxy:
 
         logger.info("[WS ] connect -> %s", self._mask_url(upstream_url))
         id_map: dict[str, str] = {}
+        ws_close_code: int | None = None
+        ws_counted = False
 
         try:
             assert self._session is not None
@@ -368,7 +392,7 @@ class CodexProxy:
                 upstream_url,
                 headers=fwd_headers,
                 protocols=ws_protocols,
-                proxy=self.upstream_proxy,
+                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,
                 heartbeat=30
             ) as ws_upstream:
                 
@@ -391,10 +415,13 @@ class CodexProxy:
                         ws_client.headers[name] = val
                         
                 await ws_client.prepare(request)
+                self.stats.ws_connected()
+                ws_counted = True
                 
                 logger.info("[WS ] upstream established; accepting client")
 
                 async def client_to_upstream():
+                    nonlocal ws_close_code
                     try:
                         async for msg in ws_client:
                             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -408,15 +435,18 @@ class CodexProxy:
                                 try:
                                     obj, f, d = _sanitise_request_body(obj, self.reasoning_mode, id_map=id_map)
                                     if f or d:
+                                        self.stats.record_rewrite(f, d)
                                         logger.info("WS c->u | msg-id fixes: %d | drops: %d", f, d)
                                     await ws_upstream.send_str(json.dumps(obj, ensure_ascii=False))
                                 except Exception as e:
                                     logger.error("WS request sanitize error: %s", type(e).__name__)
+                                    ws_close_code = 1011
                                     await ws_client.close(code=1011, message=b"Internal Proxy Error")
                                     break
                             elif msg.type == aiohttp.WSMsgType.BINARY:
                                 await ws_upstream.send_bytes(msg.data)
                             elif msg.type == aiohttp.WSMsgType.CLOSE:
+                                ws_close_code = msg.data if isinstance(msg.data, int) else ws_close_code
                                 extra = msg.extra.encode('utf-8') if isinstance(msg.extra, str) else msg.extra
                                 await ws_upstream.close(code=msg.data, message=extra)
                                 break
@@ -426,6 +456,7 @@ class CodexProxy:
                         logger.error("WS c->u loop error: %s", type(e).__name__)
 
                 async def upstream_to_client():
+                    nonlocal ws_close_code
                     try:
                         async for msg in ws_upstream:
                             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -440,11 +471,13 @@ class CodexProxy:
                                     await ws_client.send_str(json.dumps(obj, ensure_ascii=False))
                                 except Exception as e:
                                     logger.error("WS response sanitize error: %s", type(e).__name__)
+                                    ws_close_code = 1011
                                     await ws_upstream.close(code=1011, message=b"Internal Proxy Error")
                                     break
                             elif msg.type == aiohttp.WSMsgType.BINARY:
                                 await ws_client.send_bytes(msg.data)
                             elif msg.type == aiohttp.WSMsgType.CLOSE:
+                                ws_close_code = msg.data if isinstance(msg.data, int) else ws_close_code
                                 extra = msg.extra.encode('utf-8') if isinstance(msg.extra, str) else msg.extra
                                 await ws_client.close(code=msg.data, message=extra)
                                 break
@@ -469,12 +502,21 @@ class CodexProxy:
                     await ws_upstream.close()
                     
         except aiohttp.ClientError as exc:
+            self.stats.ws_failed("websocket handshake failed")
             logger.error("WS Upstream handshake failed: %s", type(exc).__name__)
             # Reject client if we haven't prepared yet
             return web.Response(status=502, text="WS upstream connection failed")
         except Exception as e:
+            self.stats.ws_failed("websocket proxy error")
             logger.error("WS Proxy Error: %s", type(e).__name__)
         finally:
+            if ws_counted:
+                code = ws_close_code
+                try:
+                    code = code or getattr(ws_upstream, "close_code", None) or getattr(ws_client, "close_code", None)
+                except Exception:
+                    pass
+                self.stats.ws_closed(code)
             logger.info("[WS ] disconnected")
 
         # Fallback if ws_client was prepared
@@ -522,6 +564,8 @@ class CodexProxy:
                                 if "error" in evt_type.lower() or obj.get("error"):
                                     err = obj.get("error", {})
                                     code = err.get("code") or err.get("type") or evt_type
+                                    message = err.get("message") if isinstance(err, dict) else None
+                                    self.stats.record_error(upstream_resp.status, str(message or code), event_type=evt_type)
                                     logger.warning("SSE error event: type=%r code=%r", evt_type, code)
                                 else:
                                     logger.debug("SSE first event type: %r", evt_type)
@@ -543,6 +587,7 @@ class CodexProxy:
                 pass
 
         if total_fixes:
+            self.stats.record_rewrite(total_fixes, 0)
             logger.info("sse stream complete: %d id fixes total", total_fixes)
             
         return client_resp
@@ -553,8 +598,8 @@ class CodexProxy:
 # ---------------------------------------------------------------------------
 
 
-def make_app(upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None) -> web.Application:
-    proxy = CodexProxy(upstream_base=upstream_base, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy)
+def make_app(upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None, proxy_mode: str = "direct") -> web.Application:
+    proxy = CodexProxy(upstream_base=upstream_base, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy, proxy_mode=proxy_mode)
 
     async def _startup(app: web.Application) -> None:
         await proxy.startup()
@@ -567,6 +612,7 @@ def make_app(upstream_base: str, reasoning_mode: str, port: int, upstream_proxy:
     app.on_cleanup.append(_shutdown)
     app.router.add_get("/health", proxy.handle_health)
     app.router.add_get("/health/details", proxy.handle_health_details)
+    app.router.add_get("/stats", proxy.handle_stats)
     app.router.add_route("*", "/{path_info:.*}", proxy.handle_proxy)
 
     return app
@@ -581,7 +627,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Codex Desktop ID compatibility proxy")
     p.add_argument("--port", type=int, default=int(os.environ.get("PROXY_PORT", DEFAULT_PORT)))
     p.add_argument("--upstream", default=os.environ.get("PROXY_UPSTREAM", DEFAULT_UPSTREAM))
-    p.add_argument("--upstream-proxy", default=os.environ.get("PROXY_UPSTREAM_PROXY", None), help="Optional HTTP proxy for outbound connections")
+    p.add_argument("--upstream-proxy", default=os.environ.get("PROXY_UPSTREAM_PROXY", None), help="HTTP proxy URL used when --proxy-mode=explicit")
+    p.add_argument("--proxy-mode", choices=["direct", "env", "explicit"], default=os.environ.get("PROXY_MODE", "direct"), help="Outbound networking: true direct, system environment proxy, or explicit proxy URL")
     p.add_argument(
         "--reasoning-mode",
         default=os.environ.get("PROXY_REASONING_MODE", DEFAULT_REASONING_MODE),
@@ -615,6 +662,9 @@ def main() -> None:
     port: int = args.port
     upstream: str = args.upstream
     upstream_proxy: str | None = args.upstream_proxy
+    proxy_mode: str = args.proxy_mode
+    if upstream_proxy and proxy_mode == "direct":
+        proxy_mode = "explicit"  # backwards-compatible CLI behaviour
     reasoning_mode: str = args.reasoning_mode
 
     if not (1 <= port <= 65535):
@@ -622,19 +672,22 @@ def main() -> None:
     parsed_upstream = urlsplit(upstream)
     if parsed_upstream.scheme not in {"http", "https"} or not parsed_upstream.hostname:
         raise SystemExit("--upstream must be an absolute http(s) URL")
+    if proxy_mode == "explicit" and not upstream_proxy:
+        raise SystemExit("--proxy-mode=explicit requires --upstream-proxy")
 
     print("=" * 60)
     print("  Codex ID compatibility proxy")
     print(f"  Listening: http://127.0.0.1:{port}")
     print(f"  Upstream:  {_mask_url(upstream)}")
-    if upstream_proxy:
+    print(f"  Proxy mode: {proxy_mode}")
+    if proxy_mode == "explicit" and upstream_proxy:
         print(f"  Proxy:     {_mask_url(upstream_proxy)}")
     print(f"  Reasoning mode: {reasoning_mode}")
     print("=" * 60)
     print(f"  Health check: http://127.0.0.1:{port}/health")
     print("=" * 60)
 
-    app = make_app(upstream_base=upstream, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy)
+    app = make_app(upstream_base=upstream, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy, proxy_mode=proxy_mode)
     web.run_app(app, host="127.0.0.1", port=port, access_log=None)
 
 

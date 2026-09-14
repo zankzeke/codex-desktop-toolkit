@@ -318,7 +318,7 @@ old_close = '''    def _on_close(self):
         finally:
             self.destroy()
 '''
-new_close = '''    def _restore_from_tray(self):
+new_close = r'''    def _restore_from_tray(self):
         self._tray.restore_window()
 
     def _force_exit(self):
@@ -1065,3 +1065,4 @@ release = re.sub(
 write(".github/workflows/release.yml", release)
 
 print("v0.4.0 migration applied")
+

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - 2026-09-14
+
+- Added three-layer connection truth: local proxy health, Codex provider attachment, and verified real Codex traffic.
+- Added in-memory `/stats` telemetry with last transport/status, rewrite counters, WebSocket handshakes/reconnects/close codes, and privacy-safe error categories.
+- Outbound networking is deterministic: true direct mode ignores proxy environment variables, with separate system-environment and explicit-proxy modes.
+- Added system-tray background mode and safe exit that restores the previous Codex provider before stopping the proxy.
+- Added one-click **Launch Codex through proxy** workflow.
+- Hardened config restore so external `config.toml` changes are not silently overwritten.
+- Expanded Diagnostics into a diagnostics center with masked copyable Markdown reports.
+- Added notification-only GitHub update checks; no silent downloads or installs.
+- Release CI smoke-tests the packaged proxy executable across health, HTTP, SSE and WebSocket.
+- Release artifacts include SHA256 checksums and optional Authenticode signing when repository signing secrets are configured.
+
 ## 0.3.1 - 2026-09-14
 
 - Fixed starting the local proxy after Codex Desktop is already running.
