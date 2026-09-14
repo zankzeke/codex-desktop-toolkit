@@ -45,7 +45,7 @@ jobs:
           text = text.replace(anchor, route_block, 1)
 
           old_build = '''    def _build_upstream_url(self, raw_path: str) -> str:\n        """Map a local request path onto the configured upstream base URL."""\n        parsed = urlsplit(self.upstream_base)\n        path = raw_path\n        # ChatGPT Codex backend expects /responses rather than /v1/responses.\n        # Also avoid doubling /v1 for API-style custom bases such as\n        # https://api.openai.com/v1.\n        if path.startswith("/v1/") and (\n            parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")\n        ):\n            path = path[3:]\n        return self.upstream_base.rstrip("/") + path\n'''
-          new_build = '''    def _build_upstream_url(self, local_path: str) -> str:\n        """Map an approved local path onto the configured upstream base URL.\n\n        ``local_path`` selects one of a finite set of literal suffixes. Query\n        parameters are deliberately not accepted here; callers pass them via\n        aiohttp's ``params=`` argument instead of splicing request text into\n        the URL.\n        """\n        route = _resolve_forward_route(local_path)\n        if route is None:\n            raise ValueError("unsupported proxy endpoint")\n        _label, stripped_suffix, full_suffix = route\n        parsed = urlsplit(self.upstream_base)\n        # ChatGPT Codex backend expects /responses rather than /v1/responses.\n        # Also avoid doubling /v1 for API-style custom bases such as\n        # https://api.openai.com/v1.\n        suffix = (\n            stripped_suffix\n            if parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")\n            else full_suffix\n        )\n        return self.upstream_base.rstrip("/") + suffix\n'''
+          new_build = '''    def _build_upstream_url(self, local_path: str) -> str:\n        """Map an approved local path onto the configured upstream base URL.\n\n        ``local_path`` selects one of a finite set of literal suffixes. Query\n        parameters are deliberately not accepted here; callers pass them via\n        aiohttp's ``params=`` argument instead of splicing request text into\n        the URL.\n        """\n        route = _resolve_forward_route(local_path)\n        if route is None:\n            raise ValueError("unsupported proxy endpoint")\n        _label, stripped_suffix, full_suffix = route\n        parsed = urlsplit(self.upstream_base)\n        suffix = (\n            stripped_suffix\n            if parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")\n            else full_suffix\n        )\n        return self.upstream_base.rstrip("/") + suffix\n'''
           if old_build not in text:
               raise SystemExit('_build_upstream_url block not found')
           text = text.replace(old_build, new_build, 1)
@@ -55,12 +55,6 @@ jobs:
           if old_initial not in text:
               raise SystemExit('handle_proxy initial block not found')
           text = text.replace(old_initial, new_initial, 1)
-
-          text = text.replace(
-              '            return await self._proxy_websocket(request, upstream_url, fwd_headers)\n',
-              '            return await self._proxy_websocket(request, upstream_url, fwd_headers)\n',
-              1,
-          )
 
           old_logs = '''        if msg_fixes or reasoning_drops:\n            logger.info(\n                "[OUT] %s %s | msg-id fixes: %d | reasoning drops: %d",\n                request.method,\n                path.split("?")[0],\n                msg_fixes,\n                reasoning_drops,\n            )\n        else:\n            logger.info("[OUT] %s %s -> %s", request.method, path.split("?")[0], self._mask_url(upstream_url))\n'''
           new_logs = '''        if msg_fixes or reasoning_drops:\n            logger.info(\n                "[OUT] %s route=%s | msg-id fixes: %d | reasoning drops: %d",\n                request.method,\n                route_label,\n                msg_fixes,\n                reasoning_drops,\n            )\n        else:\n            logger.info("[OUT] %s route=%s -> configured upstream", request.method, route_label)\n'''
@@ -81,7 +75,7 @@ jobs:
           )
           text = text.replace(
               '            return await self._stream_sse(request, upstream_resp, resp_headers, path)\n',
-              '            return await self._stream_sse(request, upstream_resp, resp_headers)\n',
+              '            return await self._stream_sse(request, upstream_resp, resp_headers, local_path)\n',
               1,
           )
           text = text.replace(
@@ -95,12 +89,6 @@ jobs:
           if old_ws not in text:
               raise SystemExit('WS upstream request block not found')
           text = text.replace(old_ws, new_ws, 1)
-
-          old_sse_sig = '''    async def _stream_sse(\n        self,\n        request: web.Request,\n        upstream_resp: aiohttp.ClientResponse,\n        resp_headers: dict[str, str],\n        path: str,\n    ) -> web.StreamResponse:\n'''
-          new_sse_sig = '''    async def _stream_sse(\n        self,\n        request: web.Request,\n        upstream_resp: aiohttp.ClientResponse,\n        resp_headers: dict[str, str],\n    ) -> web.StreamResponse:\n'''
-          if old_sse_sig not in text:
-              raise SystemExit('SSE signature not found')
-          text = text.replace(old_sse_sig, new_sse_sig, 1)
 
           p.write_text(text, encoding='utf-8', newline='\n')
 
@@ -121,6 +109,11 @@ jobs:
           if 'test_unknown_proxy_endpoint_is_rejected_without_contacting_upstream' not in tests:
               tests += append
           t.write_text(tests, encoding='utf-8', newline='\n')
+
+          console = Path('tests/test_console_logging.py')
+          console_text = console.read_text(encoding='utf-8')
+          console_text = console_text.replace('"[OUT] %s %s",', '"[OUT] %s route=%s",', 1)
+          console.write_text(console_text, encoding='utf-8', newline='\n')
           '@ | python -
 
       - name: Validate
@@ -135,6 +128,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add proxy.py tests/test_proxy.py
+          git add proxy.py tests/test_proxy.py tests/test_console_logging.py
           git commit -m "security: constrain proxy targets and harden logging"
           git push origin HEAD:security/codeql-alert-triage
