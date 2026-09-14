@@ -9,6 +9,8 @@ It is therefore important to understand that the proxy is **not** an authenticat
 ## Safe defaults
 
 - The proxy binds to `127.0.0.1` only.
+- The proxy forwards only an allowlist of Codex API routes and rejects unknown local paths before contacting the upstream.
+- Incoming query parameters are kept separate from upstream URL construction.
 - Request/response bodies are not intentionally logged.
 - Authentication headers are not intentionally logged.
 - Diagnostic URLs redact embedded user-info and remove query strings.

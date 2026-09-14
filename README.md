@@ -206,6 +206,8 @@ For WebSocket requests the proxy:
 The proxy is a compatibility layer, **not an authentication isolation boundary**.
 
 - It listens on loopback only.
+- It forwards only an allowlist of Codex API routes (`responses`, `responses/compact`, and `models`, including `/v1/...` aliases); unknown paths are rejected locally.
+- Request query parameters are forwarded separately from upstream URL construction, so request targets cannot extend or redirect the configured upstream path.
 - Authorization/Cookie headers received from Codex are forwarded to the configured upstream because the upstream needs them to authenticate the request.
 - The toolkit does not intentionally persist those credentials and does not log request/response bodies.
 - Logged/diagnostic URLs redact embedded user-info and remove query strings.

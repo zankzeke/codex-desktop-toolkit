@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.4 - 2026-09-14
+
+- Fixed CodeQL partial-SSRF findings by forwarding only the Codex endpoints the compatibility proxy is expected to handle.
+- Request query parameters are forwarded separately and are no longer concatenated into the configured upstream URL.
+- Unknown local proxy paths now return HTTP 404 without contacting the configured upstream.
+- Removed request-controlled path/URL values from runtime proxy log records to prevent log-forging/injection findings.
+- Added regression coverage for route allowlisting and unsupported endpoint rejection.
+- Re-ran the `security-extended` CodeQL query suite and confirmed zero SARIF findings after the fixes.
+
 ## 0.4.3 - 2026-09-14
 
 - Added CodeQL Python security scanning on pushes, pull requests, and a weekly schedule using the current CodeQL Action v4.
