@@ -22,6 +22,14 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Fix migration string escaping
+        shell: pwsh
+        run: |
+          $p = '.github/scripts/apply_v040.py'
+          $text = Get-Content $p -Raw -Encoding utf8
+          $text = $text.Replace("new_close = '''", "new_close = r'''")
+          Set-Content -Path $p -Value $text -Encoding utf8
+
       - name: Apply migration
         run: python .github/scripts/apply_v040.py
 
