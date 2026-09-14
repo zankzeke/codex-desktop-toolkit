@@ -1,0 +1,148 @@
+name: Apply v0.4.1 release polish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-v041-polish.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply final polish
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: expected one match for {old[:80]!r}, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          # Move log styling/clear button back into ProxyTab._build.  It had
+          # accidentally lived in _manage_upstreams and referenced log_frame
+          # outside its scope.
+          misplaced = '''        self._log.tag_config("info", foreground=self._app.palette["accent"])
+          self._log.tag_config("warn", foreground=self._app.palette["warn"])
+          self._log.tag_config("error", foreground=self._app.palette["danger"])
+          self._log.tag_config("ok", foreground=self._app.palette["success"])
+
+          ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
+              side=tk.RIGHT, padx=4, pady=4
+          )
+
+'''
+          replace_once('codex_toolkit_gui.py', misplaced, '')
+          replace_once(
+              'codex_toolkit_gui.py',
+              '        self._log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)\n        self.after(800, self._poll_runtime_status)\n',
+              '        self._log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)\n'
+              '        self._log.tag_config("info", foreground=self._app.palette["accent"])\n'
+              '        self._log.tag_config("warn", foreground=self._app.palette["warn"])\n'
+              '        self._log.tag_config("error", foreground=self._app.palette["danger"])\n'
+              '        self._log.tag_config("ok", foreground=self._app.palette["success"])\n'
+              '        ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(\n'
+              '            side=tk.RIGHT, padx=4, pady=4\n'
+              '        )\n'
+              '        self.after(800, self._poll_runtime_status)\n',
+          )
+
+          # Avoid a stale one-click launch request after validation/startup failed.
+          replace_once(
+              'codex_toolkit_gui.py',
+              '        self._launch_pending = True\n        self._start_proxy()\n\n    def _on_proxy_ready',
+              '        self._launch_pending = True\n'
+              '        self._start_proxy()\n'
+              '        proc = self._app._proxy_proc\n'
+              '        if not proc or proc.poll() is not None:\n'
+              '            self._launch_pending = False\n\n'
+              '    def _on_proxy_ready',
+          )
+
+          # Count response-side ID rewrites as well as request-side rewrites.
+          replace_once(
+              'proxy.py',
+              '                    if fixes:\n                        logger.info("response body: %d id fixes", fixes)\n',
+              '                    if fixes:\n'
+              '                        self.stats.record_rewrite(fixes, 0)\n'
+              '                        logger.info("response body: %d id fixes", fixes)\n',
+          )
+          replace_once(
+              'proxy.py',
+              '                                    obj, _, f = rewrite_response_object(obj, id_map=id_map)\n                                    await ws_client.send_str(json.dumps(obj, ensure_ascii=False))\n',
+              '                                    obj, _, f = rewrite_response_object(obj, id_map=id_map)\n'
+              '                                    if f:\n'
+              '                                        self.stats.record_rewrite(f, 0)\n'
+              '                                    await ws_client.send_str(json.dumps(obj, ensure_ascii=False))\n',
+          )
+
+          # Privacy-safe report: home path is redacted and NO_PROXY contents are
+          # reported only as set/unset because corporate domains can be private.
+          replace_once(
+              'diagnostics.py',
+              '    lines = [\n',
+              '    codex_path = str(codex.get("path") or "unknown")\n'
+              '    try:\n'
+              '        home = str(Path.home())\n'
+              '        if home and codex_path.lower().startswith(home.lower()):\n'
+              '            codex_path = "~" + codex_path[len(home):]\n'
+              '    except Exception:\n'
+              '        pass\n'
+              '    lines = [\n',
+          )
+          replace_once(
+              'diagnostics.py',
+              '        f"- Codex executable: {codex.get(\'path\') or \'unknown\'}",\n',
+              '        f"- Codex executable: {codex_path}",\n',
+          )
+          replace_once(
+              'diagnostics.py',
+              '        f"- NO_PROXY: {net.get(\'no_proxy\') or \'unset\'}",\n',
+              '        f"- NO_PROXY: {\'set (contents redacted)\' if net.get(\'no_proxy\') else \'unset\'}",\n',
+          )
+
+          replace_once('ui_theme.py', 'APP_VERSION = "0.4.0"', 'APP_VERSION = "0.4.1"')
+          replace_once('tests/test_gui_metadata.py', "assert ui_theme.APP_VERSION == '0.4.0'", "assert ui_theme.APP_VERSION == '0.4.1'")
+
+          tests = Path('tests/test_v041_polish.py')
+          tests.write_text('''from pathlib import Path\n\n\ndef test_log_controls_are_built_in_build_scope():\n    text = Path("codex_toolkit_gui.py").read_text(encoding="utf-8")\n    assert text.count("ttk.Button(log_frame, text=\\"清空日志\\"") == 1\n    assert text.index("ttk.Button(log_frame, text=\\"清空日志\\"") < text.index("    def _center_window")\n    manage = text[text.index("    def _manage_upstreams"):text.index("    def _show_proxy_help")]\n    assert "log_frame" not in manage\n\n\ndef test_one_click_pending_launch_is_cleared_on_failed_start():\n    text = Path("codex_toolkit_gui.py").read_text(encoding="utf-8")\n    assert "if not proc or proc.poll() is not None:" in text\n    assert "self._launch_pending = False" in text\n\n\ndef test_response_side_rewrites_update_stats():\n    text = Path("proxy.py").read_text(encoding="utf-8")\n    assert "self.stats.record_rewrite(fixes, 0)" in text\n    assert "self.stats.record_rewrite(f, 0)" in text\n\n\ndef test_diagnostic_report_redacts_home_and_no_proxy():\n    text = Path("diagnostics.py").read_text(encoding="utf-8")\n    assert "contents redacted" in text\n    assert "codex_path = \\\"~\\\" + codex_path[len(home):]" in text\n''', encoding='utf-8', newline='\n')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          entry = '''## 0.4.1 - 2026-09-14\n\n- Fixed the upstream-manager dialog crash caused by the log clear button being attached from the wrong scope.\n- One-click launch no longer leaves a stale pending launch flag after proxy startup validation fails.\n- Runtime ID rewrite totals now include non-streaming and WebSocket response-side rewrites.\n- Copied diagnostic reports redact the user home prefix and do not expose NO_PROXY contents.\n\n'''
+          if entry not in text:
+              text = text.replace('# Changelog\n\n', '# Changelog\n\n' + entry, 1)
+              changelog.write_text(text, encoding='utf-8', newline='\n')
+          '@ | python -
+
+      - name: Validate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q .
+          python -m pytest -q
+
+      - name: Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: final v0.4.1 runtime and privacy polish"
+          git push origin HEAD:main
