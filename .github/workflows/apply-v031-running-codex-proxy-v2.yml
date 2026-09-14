@@ -1,0 +1,128 @@
+name: Apply v0.3.1 running Codex proxy activation fix v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-v031-running-codex-proxy-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Patch source and tests
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import re
+
+          def replace_once(text, old, new, label):
+              if text.count(old) != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, got {text.count(old)}")
+              return text.replace(old, new, 1)
+
+          # config_manager.py
+          p = Path('config_manager.py')
+          text = p.read_text(encoding='utf-8')
+          anchor = 'def enable_proxy_config(port: int, ws_enabled: bool) -> Tuple[bool, str]:\n'
+          helper = '''def get_proxy_config_status(port: int | None = None) -> dict:\n    """Read whether Codex currently points at the local id-fix provider."""\n    result = {\n        "config_exists": CONFIG_PATH.exists(), "parse_ok": False,\n        "provider": None, "active": False, "base_url": None,\n        "active_for_port": False,\n    }\n    if not CONFIG_PATH.exists():\n        return result\n    try:\n        with open(CONFIG_PATH, "r", encoding="utf-8") as f:\n            doc = tomlkit.load(f)\n    except Exception as e:\n        result["error"] = str(e)\n        return result\n    provider = str(doc.get("model_provider", "openai"))\n    providers = doc.get("model_providers", {})\n    block = providers.get("openai-idfix", {}) if providers else {}\n    base_url = str(block.get("base_url", "")) if block else ""\n    result.update({\n        "parse_ok": True, "provider": provider,\n        "active": provider == "openai-idfix",\n        "base_url": base_url or None,\n    })\n    if port is None:\n        result["active_for_port"] = result["active"]\n    else:\n        expected = f"http://127.0.0.1:{int(port)}/v1"\n        result["active_for_port"] = result["active"] and base_url.rstrip("/") == expected.rstrip("/")\n    return result\n\n'''
+          if 'def get_proxy_config_status(' not in text:
+              if anchor not in text:
+                  raise SystemExit('config manager anchor missing')
+              text = text.replace(anchor, helper + anchor, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          # GUI import + activation path
+          p = Path('codex_toolkit_gui.py')
+          text = p.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '    enable_proxy_config, disable_proxy_config, \n',
+              '    enable_proxy_config, disable_proxy_config, get_proxy_config_status,\n',
+              'config import',
+          )
+
+          method_anchor = '    def _start_proxy(self):\n'
+          method = '''    def _on_proxy_ready(self, port_num: int):\n        """Make a newly started proxy effective for an already-running Codex."""\n        self._set_running(True)\n        status = get_proxy_config_status(port_num)\n\n        if not is_codex_running():\n            if not status.get("active_for_port"):\n                self._append_log(\n                    "[提示] 本地代理已启动，但 Codex 配置尚未指向该代理。请先启用代理配置，再启动 Codex。",\n                    "warn",\n                )\n            return\n\n        if status.get("active_for_port"):\n            if messagebox.askyesno(\n                "需要重启 Codex",\n                "检测到 Codex Desktop 已经在运行。\\n\\n"\n                "Codex 在启动时会读取 provider/连接状态；仅在运行期间启动本地代理，"\n                "当前进程不一定会热切换到新代理。\\n\\n"\n                "代理已经正常启动。是否现在重启 Codex，让它立即重新连接本地代理？",\n            ):\n                ok, msg = restart_codex()\n                if ok:\n                    self._append_log(f"[Codex 重启] 已重新加载代理配置: {msg}", "ok")\n                else:\n                    messagebox.showwarning("重启失败", f"{msg}\\n\\n代理仍在运行，请手动重启 Codex Desktop。")\n            else:\n                self._append_log(\n                    "[提示] 代理已运行，但当前 Codex 可能仍使用启动时的旧连接；重启 Codex 后生效。",\n                    "warn",\n                )\n            return\n\n        if not messagebox.askyesno(\n            "让 Codex 接入代理",\n            "检测到 Codex Desktop 已经在运行，但当前 config.toml 并未指向刚启动的本地代理。\\n\\n"\n            "只启动 127.0.0.1 的代理服务不会自动改写已经运行的 Codex 连接。\\n"\n            "需要写入 openai-idfix provider 并重启 Codex 才能立即生效。\\n\\n"\n            "是否现在一键启用代理配置并重启 Codex？",\n        ):\n            self._append_log(\n                "[提示] 本地代理已启动，但当前 Codex 尚未接入；启用代理配置并重启后生效。",\n                "warn",\n            )\n            return\n\n        ok, msg = enable_proxy_config(port_num, self._ws_var.get())\n        if not ok:\n            self._append_log(f"[配置错误] {msg}", "error")\n            messagebox.showerror("写入失败", msg)\n            return\n        self._append_log(\n            f"[配置更新] 已自动启用代理配置: 端口 {port_num}, WS={self._ws_var.get()}", "ok"\n        )\n        ok, msg = restart_codex()\n        if ok:\n            self._append_log(f"[Codex 重启] 已接入本地代理: {msg}", "ok")\n        else:\n            messagebox.showwarning(\n                "重启失败",\n                f"代理配置已写入，但自动重启失败：{msg}\\n\\n请手动重启 Codex Desktop；重启后会使用本地代理。",\n            )\n\n'''
+          if 'def _on_proxy_ready(' not in text:
+              if method_anchor not in text:
+                  raise SystemExit('GUI start proxy anchor missing')
+              text = text.replace(method_anchor, method + method_anchor, 1)
+
+          text = replace_once(
+              text,
+              '                            self._app.after(0, lambda: self._set_running(True))\n',
+              '                            self._app.after(0, lambda p=port_num: self._on_proxy_ready(p))\n',
+              'health callback',
+          )
+
+          old = '''        if ok:\n            self._append_log(f"[配置更新] 已启用代理配置: 端口 {port}, WS={ws_enabled}", "ok")\n            messagebox.showinfo("成功", "代理配置已写入。\\n如果 Codex 正在运行，请重启 Codex Desktop 以生效。")\n        else:\n'''
+          new = '''        if ok:\n            self._append_log(f"[配置更新] 已启用代理配置: 端口 {port}, WS={ws_enabled}", "ok")\n            if is_codex_running():\n                if messagebox.askyesno(\n                    "配置已写入，需要重启",\n                    "Codex Desktop 当前正在运行。\\n\\n运行中的 Codex 不会可靠地热切换 provider。是否现在重启 Codex 立即生效？",\n                ):\n                    r_ok, r_msg = restart_codex()\n                    if r_ok:\n                        self._append_log(f"[Codex 重启] 已重新加载代理配置: {r_msg}", "ok")\n                        messagebox.showinfo("成功", "代理配置已写入，Codex Desktop 已重启并重新加载配置。")\n                    else:\n                        messagebox.showwarning("重启失败", f"代理配置已写入，但自动重启失败：{r_msg}\\n\\n请手动重启 Codex Desktop。")\n                else:\n                    messagebox.showinfo("成功", "代理配置已写入。当前 Codex 仍可能继续使用旧连接，重启后生效。")\n            else:\n                messagebox.showinfo("成功", "代理配置已写入。下次启动 Codex Desktop 时会使用该代理。")\n        else:\n'''
+          text = replace_once(text, old, new, 'enable proxy config behavior')
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          # Metadata/docs/tests
+          p = Path('ui_theme.py')
+          text = p.read_text(encoding='utf-8')
+          text, n = re.subn(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "0.3.1"', text, count=1)
+          if n != 1: raise SystemExit('version update failed')
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          p = Path('tests/test_gui_metadata.py')
+          text = p.read_text(encoding='utf-8')
+          text, n = re.subn(r"assert ui_theme\.APP_VERSION == '[^']+'", "assert ui_theme.APP_VERSION == '0.3.1'", text, count=1)
+          if n != 1: raise SystemExit('version test update failed')
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          p = Path('tests/test_config_manager.py')
+          text = p.read_text(encoding='utf-8')
+          if 'test_proxy_config_status_tracks_active_port' not in text:
+              text += '''\n\ndef test_proxy_config_status_tracks_active_port(tmp_path: Path, monkeypatch):\n    config = tmp_path / "config.toml"\n    state = tmp_path / "state.json"\n    config.write_text('model_provider = "openai"\\n', encoding="utf-8")\n    monkeypatch.setattr(config_manager, "CONFIG_PATH", config)\n    monkeypatch.setattr(config_manager, "STATE_PATH", state)\n    assert config_manager.get_proxy_config_status(8787)["active_for_port"] is False\n    ok, _ = config_manager.enable_proxy_config(8787, True)\n    assert ok\n    status = config_manager.get_proxy_config_status(8787)\n    assert status["active"] is True\n    assert status["active_for_port"] is True\n    assert status["base_url"] == "http://127.0.0.1:8787/v1"\n    assert config_manager.get_proxy_config_status(9999)["active_for_port"] is False\n'''
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          Path('tests/test_running_codex_proxy_activation.py').write_text('''from pathlib import Path\n\n\ndef test_running_codex_activation_path_exists():\n    text = Path("codex_toolkit_gui.py").read_text(encoding="utf-8")\n    assert "def _on_proxy_ready" in text\n    assert "get_proxy_config_status(port_num)" in text\n    assert "enable_proxy_config(port_num, self._ws_var.get())" in text\n    assert "运行中的 Codex 不会可靠地热切换 provider" in text\n''', encoding='utf-8', newline='\n')
+
+          p = Path('README.md')
+          text = p.read_text(encoding='utf-8')
+          text = re.sub(r'CodexBridgeToolkit-[0-9.]+-windows-x64\.zip', 'CodexBridgeToolkit-0.3.1-windows-x64.zip', text, count=1)
+          marker = '3. Start `CodexBridgeToolkit.exe`.\n'
+          note = '\n> If Codex Desktop is already running when the proxy is started, Toolkit now offers to apply/confirm the local provider and restart Codex. A running Codex process does not reliably hot-switch provider connections just because the local proxy starts later.\n'
+          if marker in text and 'does not reliably hot-switch provider connections' not in text:
+              text = text.replace(marker, marker + note, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          p = Path('CHANGELOG.md')
+          text = p.read_text(encoding='utf-8')
+          entry = '''## 0.3.1 - 2026-09-14\n\n- Fixed starting the local proxy after Codex Desktop is already running.\n- The GUI now checks whether `config.toml` points at the selected local proxy and offers to apply the provider plus restart Codex when required.\n- If the provider already matches, the GUI offers a restart so the existing Codex process reloads its connection state.\n- Enabling the proxy config while Codex is running now offers an immediate restart.\n\n'''
+          if entry not in text:
+              text = text.replace('# Changelog\n\n', '# Changelog\n\n' + entry, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+          '@ | python -
+
+      - name: Validate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q .
+          python -m pytest -q
+
+      - name: Commit source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex_toolkit_gui.py config_manager.py ui_theme.py README.md CHANGELOG.md tests/test_gui_metadata.py tests/test_config_manager.py tests/test_running_codex_proxy_activation.py
+          git commit -m "fix: activate proxy for already-running Codex v0.3.1"
+          git push origin HEAD:main
