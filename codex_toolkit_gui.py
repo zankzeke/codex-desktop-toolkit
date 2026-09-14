@@ -899,13 +899,13 @@ class ProxyTab(ttk.Frame):
             color = self._app.palette["success"]
             self._status_canvas.itemconfig(self._dot, fill=color)
             self._status_lbl.config(text=f"运行中  :{self._port_var.get()}", foreground=color)
-            self._start_btn.config(state=tk.DISABLED)
+            self._start_btn.config(state=tk.DISABLED, text="▶ 运行中...")
             self._stop_btn.config(state=tk.NORMAL)
         else:
             color = self._app.palette["muted"]
             self._status_canvas.itemconfig(self._dot, fill=color)
             self._status_lbl.config(text="未启动", foreground=color)
-            self._start_btn.config(state=tk.NORMAL)
+            self._start_btn.config(state=tk.NORMAL, text="▶ 启动代理")
             self._stop_btn.config(state=tk.DISABLED)
 
     def _poll_runtime_status(self):
