@@ -1,5 +1,5 @@
 name: Apply v0.4.2 hardening
-# migration-retry: 3
+# migration-retry: 4
 
 on:
   push:
@@ -34,13 +34,17 @@ jobs:
           python -m compileall -q .
           python -m pytest -q
 
-      - name: Commit v0.4.2 and remove migration helpers
+      - name: Commit v0.4.2 core hardening
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -f .github/workflows/apply-v042-hardening.yml .github/scripts/apply_v042.py .github/scripts/repair_apply_v042.py
+          # The Actions GITHUB_TOKEN cannot modify workflow files in this repo.
+          # Restore release.yml and leave this migration workflow for the
+          # connected maintainer tool to update/delete after the validated push.
+          git checkout -- .github/workflows/release.yml
+          git rm -f .github/scripts/apply_v042.py .github/scripts/repair_apply_v042.py
           git add -A
-          git commit -m "release: v0.4.2 repository and runtime hardening [release]"
+          git commit -m "feat: v0.4.2 repository and runtime hardening"
           git push origin HEAD:main
