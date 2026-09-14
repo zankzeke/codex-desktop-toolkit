@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Repair patch helper
+        run: python .github/scripts/repair_apply_v042.py
+
       - name: Apply hardening patch
         run: python .github/scripts/apply_v042.py
 
@@ -36,7 +39,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/apply-v042-hardening.yml .github/scripts/apply_v042.py
+          git rm .github/workflows/apply-v042-hardening.yml .github/scripts/apply_v042.py .github/scripts/repair_apply_v042.py
           git add -A
           git commit -m "release: v0.4.2 repository and runtime hardening [release]"
           git push origin HEAD:main
