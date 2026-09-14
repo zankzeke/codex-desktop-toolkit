@@ -123,6 +123,16 @@ def _safe_header_log(headers: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _is_responses_path(path: str) -> bool:
+    """Return True only for the local Responses endpoint.
+
+    The caller passes ``request.path`` (never the query string). A
+    trailing slash is accepted, while substring/suffix lookalikes are
+    deliberately rejected.
+    """
+    return path.rstrip("/") == "/v1/responses"
+
+
 # ---------------------------------------------------------------------------
 # Request body sanitiser
 # ---------------------------------------------------------------------------
@@ -273,7 +283,7 @@ class CodexProxy:
         body_bytes = await request.read()
         msg_fixes = 0
         reasoning_drops = 0
-        is_responses_endpoint = "/v1/responses" in path
+        is_responses_endpoint = _is_responses_path(request.path)
 
         if (
             is_responses_endpoint

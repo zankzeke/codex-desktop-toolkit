@@ -61,7 +61,7 @@ The official Codex source currently defines the same ChatGPT Codex base URL. Thi
 For most Windows users, use the packaged build from **GitHub Releases**:
 
 - [Latest Release](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
-- Download `CodexBridgeToolkit-0.4.0-windows-x64.zip`.
+- Download the `CodexBridgeToolkit-<version>-windows-x64.zip` asset shown on **Latest Release**.
 - Extract it and keep `CodexBridgeToolkit.exe` and `CodexBridgeProxy.exe` in the same folder.
 - Start `CodexBridgeToolkit.exe`.
 
@@ -231,11 +231,14 @@ python -m pytest -q
 
 CI runs the test suite on Windows with Python 3.11 and 3.13.
 
+Windows Release builds use `requirements-release.txt`, an exact dependency lock, and smoke-test both packaged executables before publishing. Recommended main-branch protection settings are documented in [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md).
+
 ## Project layout
 
 ```text
 codex_toolkit_gui.py   Tkinter GUI
 ui_theme.py            theme manager, app icon integration, Windows chrome styling
+version.py             single source of truth for the application/release version
 proxy.py               HTTP / SSE / WebSocket compatibility proxy
 id_rewriter.py         single source of truth for structured ID repair
 sse_handler.py         SSE line framing and event rewrite
@@ -244,6 +247,11 @@ fix_codex_ids.py       command-line offline fixer
 config_manager.py      config.toml structural editing / provider restore
 powershell_hook.py     optional Antigravity/agy PowerShell wrapper
 diagnostics.py         local health/diagnostic helpers
+runtime_stats.py       privacy-safe in-memory HTTP/SSE/WebSocket telemetry
+error_classifier.py    human-readable network/upstream error classification
+tray_manager.py        Windows system-tray background lifecycle
+update_checker.py      notification-only GitHub Release update checker
+process_utils.py       Windows process-tree and listening-port helpers
 start-gui.ps1          GUI bootstrap
 start.ps1              proxy bootstrap
 assets/                 application icon assets

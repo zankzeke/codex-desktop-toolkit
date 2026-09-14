@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2 - 2026-09-14
+
+- Added `version.py` as the single authoritative version source for GUI and Release packaging.
+- Added an exact `requirements-release.txt` lock for reproducible Windows Release builds.
+- Added packaged GUI smoke testing; Releases now validate both GUI and proxy executables before publication.
+- Replaced the v0.4/v0.4.1 source-string regression assertions with behavior-focused tests.
+- WebSocket reconnect telemetry now distinguishes a real idle-to-active reconnect from ordinary parallel connections.
+- Responses rewriting now uses exact `/v1/responses` path matching rather than a substring check.
+- ID repair now uses a two-phase context scan so forward references are repaired or removed; JSONL repair pre-scans the whole file for cross-line references.
+- Removed the completed one-off migration workflow and added CODEOWNERS / branch-protection guidance.
+- Release pushes are constrained to authoritative version-file changes.
+
 ## 0.4.1 - 2026-09-14
 
 - Fixed the upstream-manager dialog crash caused by the log clear button being attached from the wrong scope.

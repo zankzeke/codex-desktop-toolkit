@@ -50,7 +50,8 @@ from config_manager import (
     load_proxies, save_proxies, ENV_PROXY_SENTINEL
 )
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
-from ui_theme import ThemeManager, APP_VERSION
+from ui_theme import ThemeManager
+from version import APP_VERSION
 from tray_manager import TrayController
 from update_checker import check_for_update
 from process_utils import (
@@ -1529,6 +1530,26 @@ class DiagnosticsTab(ttk.Frame):
 
 # ─── 入口 ──────────────────────────────────────────────────────────────────────
 
+def run_gui_smoke_test() -> int:
+    """Construct the real packaged GUI once, then exit without interaction."""
+    app = App()
+    try:
+        app.update_idletasks()
+        app.update()
+        if not hasattr(app, "_proxy_tab") or not hasattr(app, "_diag_tab"):
+            raise RuntimeError("GUI tabs failed to initialise")
+        return 0
+    finally:
+        app._closing = True
+        try:
+            app._tray.stop()
+        except Exception:
+            pass
+        app.destroy()
+
+
 if __name__ == "__main__":
+    if "--smoke-test" in sys.argv:
+        raise SystemExit(run_gui_smoke_test())
     app = App()
     app.mainloop()

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Tuple, Dict
 
-from id_rewriter import sanitise_input_array
+from id_rewriter import prepare_rewrite_context, sanitise_input_array
 
 def is_codex_running() -> bool:
     """Check if Codex.exe is running."""
@@ -81,45 +81,66 @@ def fast_check_bad_ids(path: Path) -> bool:
         return False
 
 def fix_rollout_file(path: Path, dry_run: bool = False) -> Tuple[int, int, Dict[str, str]]:
-    """Fix a JSONL rollout file using sanitise_input_array logic."""
+    """Fix a JSONL rollout using a file-wide two-pass rewrite context."""
     total_fixes = 0
     total_drops = 0
     id_map: Dict[str, str] = {}
     dropped_ids: set[str] = set()
-    
-    out_lines = []
-    
+
     with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                out_lines.append(line)
-                continue
-            try:
-                obj = json.loads(stripped)
-                
-                # Treat the single line as an input array of 1 item to reuse logic
-                # (Rollout files usually contain the items directly on each line)
-                arr, id_map, fixes, drops = sanitise_input_array(
-                    [obj], id_map=id_map, dropped_ids=dropped_ids, safe_reasoning=True
-                )
-                
-                if not arr and drops > 0:
-                    # Item was entirely dropped
-                    total_drops += drops
-                    continue
-                    
-                total_fixes += fixes
-                total_drops += drops
-                
-                if arr:
-                    out_lines.append(json.dumps(arr[0], ensure_ascii=False) + "\n")
-                
-            except json.JSONDecodeError:
-                out_lines.append(line)
+        raw_lines = f.readlines()
+
+    records: list[tuple[str, object]] = []
+    parsed_objects: list[dict] = []
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            records.append(("raw", line))
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            records.append(("raw", line))
+            continue
+        records.append(("json", obj))
+        if isinstance(obj, dict):
+            parsed_objects.append(obj)
+
+    # Pre-scan the entire JSONL file before rewriting any line. This makes
+    # forward references deterministic even when the target is defined on
+    # a later line.
+    prepare_rewrite_context(
+        parsed_objects,
+        id_map=id_map,
+        dropped_ids=dropped_ids,
+        safe_reasoning=True,
+    )
+
+    out_lines: list[str] = []
+    for kind, payload in records:
+        if kind == "raw":
+            out_lines.append(str(payload))
+            continue
+
+        obj = payload
+        if not isinstance(obj, dict):
+            out_lines.append(json.dumps(obj, ensure_ascii=False) + "\n")
+            continue
+
+        arr, id_map, fixes, drops = sanitise_input_array(
+            [obj],
+            id_map=id_map,
+            dropped_ids=dropped_ids,
+            safe_reasoning=True,
+            context_prepared=True,
+        )
+        total_fixes += fixes
+        total_drops += drops
+        if arr:
+            out_lines.append(json.dumps(arr[0], ensure_ascii=False) + "\n")
 
     if not dry_run and (total_fixes > 0 or total_drops > 0):
         backup_file(path)
         atomic_write_jsonl(path, out_lines)
-        
+
     return total_fixes, total_drops, id_map

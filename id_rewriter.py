@@ -100,20 +100,65 @@ def _extract_items(obj: Any, out_items: List[Dict]) -> None:
             _extract_items(item, out_items)
 
 
-def sanitise_input_array(
-    input_arr: List[Any], 
+def prepare_rewrite_context(
+    input_arr: List[Any],
     id_map: Dict[str, str],
     dropped_ids: Set[str] | None = None,
-    safe_reasoning: bool = True
-) -> Tuple[List[Any], Dict[str, str], int, int]:
-    """
-    Sanitise an array of items or envelopes.
-    Returns (new_array, updated_id_map, fixes_count, dropped_count)
+    safe_reasoning: bool = True,
+) -> Tuple[Dict[str, str], Set[str]]:
+    """Pre-scan a complete collection before rewriting any element.
+
+    The first phase discovers typed synthetic IDs and every invalid
+    reasoning ID. The second phase can therefore repair/remove references
+    even when the reference appears before the item that defines it.
     """
     if dropped_ids is None:
         dropped_ids = set()
-        
-    new_arr = []
+
+    for item in input_arr:
+        if not isinstance(item, dict):
+            continue
+        inner_items: List[Dict] = []
+        _extract_items(item, inner_items)
+        for inner in inner_items:
+            raw_id = inner.get("id", "")
+            item_type = inner.get("type", "")
+            if not isinstance(raw_id, str) or not raw_id:
+                continue
+            if item_type == "reasoning" and safe_reasoning and not raw_id.startswith("rs_"):
+                dropped_ids.add(raw_id)
+                continue
+            rewrite_single_id(raw_id, item_type, id_map)
+
+    return id_map, dropped_ids
+
+
+def sanitise_input_array(
+    input_arr: List[Any],
+    id_map: Dict[str, str],
+    dropped_ids: Set[str] | None = None,
+    safe_reasoning: bool = True,
+    *,
+    context_prepared: bool = False,
+) -> Tuple[List[Any], Dict[str, str], int, int]:
+    """Sanitise an input array using deterministic two-phase rewriting.
+
+    Returns ``(new_array, updated_id_map, fixes_count, dropped_count)``.
+    ``context_prepared`` is used by the JSONL fixer after a file-wide
+    pre-scan, which extends forward-reference handling across lines.
+    """
+    if dropped_ids is None:
+        dropped_ids = set()
+
+    if not context_prepared:
+        prepare_rewrite_context(
+            input_arr,
+            id_map=id_map,
+            dropped_ids=dropped_ids,
+            safe_reasoning=safe_reasoning,
+        )
+
+    new_arr: List[Any] = []
     fixes = 0
     drops = 0
 
@@ -121,30 +166,24 @@ def sanitise_input_array(
         if not isinstance(item, dict):
             new_arr.append(item)
             continue
-            
+
         item_copy = copy.deepcopy(item)
-        
-        # Determine if this item or any nested payload contains a bad reasoning item
-        all_inner_items: List[Dict] = []
-        _extract_items(item_copy, all_inner_items)
-        
-        should_drop_entire_element = False
-        for inner in all_inner_items:
-            i_type = inner.get("type", "")
-            raw_id = inner.get("id", "")
-            if i_type == "reasoning" and safe_reasoning:
-                if not raw_id.startswith("rs_"):
-                    dropped_ids.add(raw_id)
-                    should_drop_entire_element = True
-                    drops += 1
-                    
-        if should_drop_entire_element:
-            # We drop the top-level element if any of its internal items is a bad reasoning block
+        inner_items: List[Dict] = []
+        _extract_items(item_copy, inner_items)
+        invalid_reasoning = [
+            inner
+            for inner in inner_items
+            if inner.get("type") == "reasoning"
+            and safe_reasoning
+            and isinstance(inner.get("id"), str)
+            and inner.get("id")
+            and not inner.get("id").startswith("rs_")
+        ]
+        if invalid_reasoning:
+            drops += len(invalid_reasoning)
             continue
-            
-        # Recursive rewrite
-        item_fixes = _walk_and_rewrite(item_copy, id_map, dropped_ids)
-        fixes += item_fixes
+
+        fixes += _walk_and_rewrite(item_copy, id_map, dropped_ids)
         new_arr.append(item_copy)
 
     return new_arr, id_map, fixes, drops

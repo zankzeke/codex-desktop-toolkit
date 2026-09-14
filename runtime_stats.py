@@ -72,7 +72,10 @@ class RuntimeStats:
         self.last_transport = "sse"
 
     def ws_connected(self) -> None:
-        if self.ws_handshakes > 0:
+        # Count a reconnect only after all earlier WS connections became idle.
+        # A second simultaneous connection is ordinary parallel traffic.
+        was_idle = self.ws_active == 0
+        if self.ws_handshakes > 0 and was_idle:
             self.ws_reconnects += 1
         self.ws_handshakes += 1
         self.ws_active += 1
