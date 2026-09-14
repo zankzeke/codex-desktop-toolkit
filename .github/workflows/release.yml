@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.4.0
+        default: v0.4.1
   push:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     env:
-      DEFAULT_TAG: v0.4.0
+      DEFAULT_TAG: v0.4.1
     steps:
       - uses: actions/checkout@v4
 
@@ -159,6 +159,12 @@ jobs:
           Windows packaged release. No separate Python installation is required.
 
           **Recommended:** download `CodexBridgeToolkit-$version-windows-x64.zip`, extract it, and keep both executables together.
+
+          ### v0.4.1 Polish Patch
+          - **Fixed Upstream Dialog**: Resolved a crash when managing upstreams due to a misplaced log-clear control.
+          - **Stale Launch Fix**: Failed validation or proxy startup no longer leaves a stuck "one-click" pending state.
+          - **Response Stats**: Rewrites in regular HTTP and WebSocket response sides are now correctly counted in telemetry.
+          - **Safer Reports**: The copied diagnostic report explicitly redacts the Windows home folder path and does not dump NO_PROXY domain contents.
 
           ### v0.4 reliability & diagnostics platform
           - **Three-layer connection truth** — distinguishes local proxy health, Codex provider attachment, and verified real Codex traffic.
