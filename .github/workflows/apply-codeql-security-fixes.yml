@@ -1,4 +1,4 @@
-name: Apply CodeQL security fixes
+name: Finalize CodeQL security fixes
 
 on:
   push:
@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  apply:
-    runs-on: windows-latest
+  finalize:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,100 +21,51 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Patch proxy routing and logging
-        shell: pwsh
+      - name: Update security release metadata
         run: |
-          @'
+          python - <<'PY'
           from pathlib import Path
 
-          p = Path('proxy.py')
-          text = p.read_text(encoding='utf-8')
+          version = Path('version.py')
+          text = version.read_text(encoding='utf-8')
+          if 'APP_VERSION = "0.4.3"' not in text:
+              raise SystemExit('unexpected current version')
+          version.write_text(text.replace('APP_VERSION = "0.4.3"', 'APP_VERSION = "0.4.4"', 1), encoding='utf-8', newline='\n')
 
-          text = text.replace(
-              '2.  Forwards every request to the official OpenAI / ChatGPT Codex backend,\n'
-              '    passing Authorization / Cookie / other auth headers verbatim.\n',
-              '2.  Forwards a small allowlist of Codex API endpoints to the configured\n'
-              '    upstream, passing Authorization / Cookie / other auth headers verbatim.\n',
-              1,
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          entry = '''## 0.4.4 - 2026-09-14\n\n- Fixed CodeQL partial-SSRF findings by forwarding only the Codex endpoints the compatibility proxy is expected to handle.\n- Request query parameters are forwarded separately and are no longer concatenated into the configured upstream URL.\n- Unknown local proxy paths now return HTTP 404 without contacting the configured upstream.\n- Removed request-controlled path/URL values from runtime proxy log records to prevent log-forging/injection findings.\n- Added regression coverage for route allowlisting and unsupported endpoint rejection.\n- Re-ran the `security-extended` CodeQL query suite and confirmed zero SARIF findings after the fixes.\n\n'''
+          if '## 0.4.4 - 2026-09-14' not in text:
+              text = text.replace('# Changelog\n\n', '# Changelog\n\n' + entry, 1)
+          changelog.write_text(text, encoding='utf-8', newline='\n')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          needle = '- It listens on loopback only.\n'
+          addition = (
+              '- It forwards only an allowlist of Codex API routes (`responses`, `responses/compact`, and `models`, including `/v1/...` aliases); unknown paths are rejected locally.\n'
+              '- Request query parameters are forwarded separately from upstream URL construction, so request targets cannot extend or redirect the configured upstream path.\n'
           )
+          if addition not in text:
+              text = text.replace(needle, needle + addition, 1)
+          readme.write_text(text, encoding='utf-8', newline='\n')
 
-          anchor = '''def _is_responses_path(path: str) -> bool:\n    """Return True only for the local Responses endpoint.\n\n    The caller passes ``request.path`` (never the query string). A\n    trailing slash is accepted, while substring/suffix lookalikes are\n    deliberately rejected.\n    """\n    return path.rstrip("/") == "/v1/responses"\n\n\n'''
-          route_block = anchor + '''# Only Codex endpoints required by the Responses provider are forwarded.\n# Incoming request data chooses between these literal routes; it is never\n# concatenated into the upstream URL. This keeps the upstream origin and path\n# under local configuration control and prevents partial-SSRF via request\n# targets. The third tuple element preserves /v1 for generic custom upstreams.\n_FORWARD_ROUTES: dict[str, tuple[str, str, str]] = {\n    "/responses": ("responses", "/responses", "/responses"),\n    "/v1/responses": ("responses", "/responses", "/v1/responses"),\n    "/responses/compact": ("responses-compact", "/responses/compact", "/responses/compact"),\n    "/v1/responses/compact": ("responses-compact", "/responses/compact", "/v1/responses/compact"),\n    "/models": ("models", "/models", "/models"),\n    "/v1/models": ("models", "/models", "/v1/models"),\n}\n\n\ndef _resolve_forward_route(path: str) -> tuple[str, str, str] | None:\n    """Resolve a request path to a literal, approved upstream route."""\n    canonical = path.rstrip("/") or "/"\n    return _FORWARD_ROUTES.get(canonical)\n\n\n'''
-          if anchor not in text:
-              raise SystemExit('responses path anchor not found')
-          text = text.replace(anchor, route_block, 1)
-
-          old_build = '''    def _build_upstream_url(self, raw_path: str) -> str:\n        """Map a local request path onto the configured upstream base URL."""\n        parsed = urlsplit(self.upstream_base)\n        path = raw_path\n        # ChatGPT Codex backend expects /responses rather than /v1/responses.\n        # Also avoid doubling /v1 for API-style custom bases such as\n        # https://api.openai.com/v1.\n        if path.startswith("/v1/") and (\n            parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")\n        ):\n            path = path[3:]\n        return self.upstream_base.rstrip("/") + path\n'''
-          new_build = '''    def _build_upstream_url(self, local_path: str) -> str:\n        """Map an approved local path onto the configured upstream base URL.\n\n        ``local_path`` selects one of a finite set of literal suffixes. Query\n        parameters are deliberately not accepted here; callers pass them via\n        aiohttp's ``params=`` argument instead of splicing request text into\n        the URL.\n        """\n        route = _resolve_forward_route(local_path)\n        if route is None:\n            raise ValueError("unsupported proxy endpoint")\n        _label, stripped_suffix, full_suffix = route\n        parsed = urlsplit(self.upstream_base)\n        suffix = (\n            stripped_suffix\n            if parsed.hostname == "chatgpt.com" or parsed.path.rstrip("/").endswith("/v1")\n            else full_suffix\n        )\n        return self.upstream_base.rstrip("/") + suffix\n'''
-          if old_build not in text:
-              raise SystemExit('_build_upstream_url block not found')
-          text = text.replace(old_build, new_build, 1)
-
-          old_initial = '''        path = request.raw_path  # includes query string\n        transport = "websocket" if request.headers.get("Upgrade", "").lower() == "websocket" else "http"\n        self.stats.record_request(request.method, path, transport)\n        upstream_url = self._build_upstream_url(path)\n'''
-          new_initial = '''        local_path = request.path  # decoded path only; query is forwarded separately\n        route = _resolve_forward_route(local_path)\n        if route is None:\n            self.stats.record_error(404, "unsupported proxy endpoint")\n            return web.Response(status=404, text="Unsupported proxy endpoint")\n        route_label = route[0]  # selected from literal allowlist, safe for logs\n        transport = "websocket" if request.headers.get("Upgrade", "").lower() == "websocket" else "http"\n        self.stats.record_request(request.method, local_path, transport)\n        upstream_url = self._build_upstream_url(local_path)\n'''
-          if old_initial not in text:
-              raise SystemExit('handle_proxy initial block not found')
-          text = text.replace(old_initial, new_initial, 1)
-
-          old_logs = '''        if msg_fixes or reasoning_drops:\n            logger.info(\n                "[OUT] %s %s | msg-id fixes: %d | reasoning drops: %d",\n                request.method,\n                path.split("?")[0],\n                msg_fixes,\n                reasoning_drops,\n            )\n        else:\n            logger.info("[OUT] %s %s -> %s", request.method, path.split("?")[0], self._mask_url(upstream_url))\n'''
-          new_logs = '''        if msg_fixes or reasoning_drops:\n            logger.info(\n                "[OUT] %s route=%s | msg-id fixes: %d | reasoning drops: %d",\n                request.method,\n                route_label,\n                msg_fixes,\n                reasoning_drops,\n            )\n        else:\n            logger.info("[OUT] %s route=%s -> configured upstream", request.method, route_label)\n'''
-          if old_logs not in text:
-              raise SystemExit('outbound logging block not found')
-          text = text.replace(old_logs, new_logs, 1)
-
-          old_request = '''            upstream_resp = await self._session.request(\n                method=request.method,\n                url=upstream_url,\n                headers=fwd_headers,\n                data=body_bytes if body_bytes else None,\n                allow_redirects=False,\n                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,\n            )\n'''
-          new_request = '''            upstream_resp = await self._session.request(\n                method=request.method,\n                url=upstream_url,\n                params=request.query,\n                headers=fwd_headers,\n                data=body_bytes if body_bytes else None,\n                allow_redirects=False,\n                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,\n            )\n'''
-          if old_request not in text:
-              raise SystemExit('HTTP upstream request block not found')
-          text = text.replace(old_request, new_request, 1)
-
-          text = text.replace(
-              '        logger.info("[IN ] upstream status: %d (url: %s)", upstream_resp.status, self._mask_url(upstream_url))\n',
-              '        logger.info("[IN ] upstream status: %d (route=%s)", upstream_resp.status, route_label)\n',
-              1,
+          security = Path('SECURITY.md')
+          text = security.read_text(encoding='utf-8')
+          needle = '- The proxy binds to `127.0.0.1` only.\n'
+          addition = (
+              '- The proxy forwards only an allowlist of Codex API routes and rejects unknown local paths before contacting the upstream.\n'
+              '- Incoming query parameters are kept separate from upstream URL construction.\n'
           )
-          text = text.replace(
-              '            return await self._stream_sse(request, upstream_resp, resp_headers, path)\n',
-              '            return await self._stream_sse(request, upstream_resp, resp_headers, local_path)\n',
-              1,
-          )
-          text = text.replace(
-              '        logger.info("[WS ] connect -> %s", self._mask_url(upstream_url))\n',
-              '        logger.info("[WS ] connect -> configured upstream")\n',
-              1,
-          )
+          if addition not in text:
+              text = text.replace(needle, needle + addition, 1)
+          security.write_text(text, encoding='utf-8', newline='\n')
 
-          old_ws = '''            async with self._session.ws_connect(\n                upstream_url,\n                headers=fwd_headers,\n                protocols=ws_protocols,\n                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,\n                heartbeat=30\n            ) as ws_upstream:\n'''
-          new_ws = '''            async with self._session.ws_connect(\n                upstream_url,\n                params=request.query,\n                headers=fwd_headers,\n                protocols=ws_protocols,\n                proxy=self.upstream_proxy if self.proxy_mode == "explicit" else None,\n                heartbeat=30\n            ) as ws_upstream:\n'''
-          if old_ws not in text:
-              raise SystemExit('WS upstream request block not found')
-          text = text.replace(old_ws, new_ws, 1)
-
-          p.write_text(text, encoding='utf-8', newline='\n')
-
-          t = Path('tests/test_proxy.py')
-          tests = t.read_text(encoding='utf-8')
-          tests = tests.replace(
-              'import json\n\nfrom aiohttp',
-              'import json\n\nimport pytest\n\nfrom aiohttp',
-              1,
-          )
-          old_test = '''def test_url_mapping_and_masking():\n    p = CodexProxy("https://chatgpt.com/backend-api/codex", "safe", 8787)\n    assert p._build_upstream_url("/v1/responses?x=1") == "https://chatgpt.com/backend-api/codex/responses?x=1"\n    p2 = CodexProxy("https://api.openai.com/v1", "safe", 8787)\n    assert p2._build_upstream_url("/v1/responses") == "https://api.openai.com/v1/responses"\n    assert p._mask_url("https://user:secret@example.com/path?token=abc#x") == "https://***:***@example.com/path"\n'''
-          new_test = '''def test_url_mapping_and_masking():\n    p = CodexProxy("https://chatgpt.com/backend-api/codex", "safe", 8787)\n    assert p._build_upstream_url("/v1/responses") == "https://chatgpt.com/backend-api/codex/responses"\n    assert p._build_upstream_url("/v1/models") == "https://chatgpt.com/backend-api/codex/models"\n    assert p._build_upstream_url("/v1/responses/compact") == "https://chatgpt.com/backend-api/codex/responses/compact"\n    p2 = CodexProxy("https://api.openai.com/v1", "safe", 8787)\n    assert p2._build_upstream_url("/v1/responses") == "https://api.openai.com/v1/responses"\n    p3 = CodexProxy("http://127.0.0.1:9999", "safe", 8787)\n    assert p3._build_upstream_url("/v1/responses") == "http://127.0.0.1:9999/v1/responses"\n    with pytest.raises(ValueError):\n        p._build_upstream_url("/v1/anything-else")\n    assert p._mask_url("https://user:secret@example.com/path?token=abc#x") == "https://***:***@example.com/path"\n'''
-          if old_test not in tests:
-              raise SystemExit('URL mapping test block not found')
-          tests = tests.replace(old_test, new_test, 1)
-
-          append = '''\n\ndef test_unknown_proxy_endpoint_is_rejected_without_contacting_upstream():\n    async def scenario():\n        hits = 0\n        upstream = web.Application()\n\n        async def catch_all(request):\n            nonlocal hits\n            hits += 1\n            return web.Response(text="unexpected")\n\n        upstream.router.add_route("*", "/{path_info:.*}", catch_all)\n        upstream_runner = web.AppRunner(upstream)\n        await upstream_runner.setup()\n        upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0)\n        await upstream_site.start()\n        upstream_port = upstream_site._server.sockets[0].getsockname()[1]\n\n        app = make_app(f"http://127.0.0.1:{upstream_port}", "safe", 0)\n        runner = web.AppRunner(app)\n        await runner.setup()\n        site = web.TCPSite(runner, "127.0.0.1", 0)\n        await site.start()\n        port = site._server.sockets[0].getsockname()[1]\n        try:\n            async with ClientSession() as session:\n                async with session.get(f"http://127.0.0.1:{port}/not-a-codex-endpoint?next=http://example.invalid") as resp:\n                    assert resp.status == 404\n            assert hits == 0\n        finally:\n            await runner.cleanup()\n            await upstream_runner.cleanup()\n\n    asyncio.run(scenario())\n'''
-          if 'test_unknown_proxy_endpoint_is_rejected_without_contacting_upstream' not in tests:
-              tests += append
-          t.write_text(tests, encoding='utf-8', newline='\n')
-
-          console = Path('tests/test_console_logging.py')
-          console_text = console.read_text(encoding='utf-8')
-          console_text = console_text.replace('"[OUT] %s %s",', '"[OUT] %s route=%s",', 1)
-          console.write_text(console_text, encoding='utf-8', newline='\n')
-          '@ | python -
+          supply = Path('docs/SUPPLY_CHAIN_SECURITY.md')
+          text = supply.read_text(encoding='utf-8')
+          text = text.replace('CodexBridgeToolkit-0.4.3-windows-x64.zip', 'CodexBridgeToolkit-<version>-windows-x64.zip')
+          supply.write_text(text, encoding='utf-8', newline='\n')
+          PY
 
       - name: Validate
         run: |
@@ -122,12 +73,10 @@ jobs:
           python -m compileall -q .
           python -m pytest -q
 
-      - name: Commit fixes
-        shell: bash
+      - name: Commit metadata
         run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add proxy.py tests/test_proxy.py tests/test_console_logging.py
-          git commit -m "security: constrain proxy targets and harden logging"
+          git add version.py CHANGELOG.md README.md SECURITY.md docs/SUPPLY_CHAIN_SECURITY.md
+          git commit -m "security: prepare v0.4.4 CodeQL remediation release"
           git push origin HEAD:security/codeql-alert-triage
