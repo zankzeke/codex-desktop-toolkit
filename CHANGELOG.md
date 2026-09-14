@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-09-14
+
+- Fixed the upstream-manager dialog crash caused by the log clear button being attached from the wrong scope.
+- One-click launch no longer leaves a stale pending launch flag after proxy startup validation fails.
+- Runtime ID rewrite totals now include non-streaming and WebSocket response-side rewrites.
+- Copied diagnostic reports redact the user home prefix and do not expose NO_PROXY contents.
+
 ## 0.4.0 - 2026-09-14
 
 - Added three-layer connection truth: local proxy health, Codex provider attachment, and verified real Codex traffic.

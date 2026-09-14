@@ -638,6 +638,13 @@ class ProxyTab(ttk.Frame):
             relief=tk.FLAT, borderwidth=0,
         )
         self._log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._log.tag_config("info", foreground=self._app.palette["accent"])
+        self._log.tag_config("warn", foreground=self._app.palette["warn"])
+        self._log.tag_config("error", foreground=self._app.palette["danger"])
+        self._log.tag_config("ok", foreground=self._app.palette["success"])
+        ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
+            side=tk.RIGHT, padx=4, pady=4
+        )
         self.after(800, self._poll_runtime_status)
 
     def _center_window(self, win, parent):
@@ -849,14 +856,7 @@ class ProxyTab(ttk.Frame):
         ttk.Button(btn_frame, text="新增", command=_add).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="删除选定", command=_delete).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="完成", command=top.destroy).pack(side=tk.RIGHT)
-        self._log.tag_config("info", foreground=self._app.palette["accent"])
-        self._log.tag_config("warn", foreground=self._app.palette["warn"])
-        self._log.tag_config("error", foreground=self._app.palette["danger"])
-        self._log.tag_config("ok", foreground=self._app.palette["success"])
 
-        ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
-            side=tk.RIGHT, padx=4, pady=4
-        )
 
     def _show_proxy_help(self):
         messagebox.showinfo(
@@ -1003,6 +1003,9 @@ class ProxyTab(ttk.Frame):
             return
         self._launch_pending = True
         self._start_proxy()
+        proc = self._app._proxy_proc
+        if not proc or proc.poll() is not None:
+            self._launch_pending = False
 
     def _on_proxy_ready(self, port_num: int):
         """Make a newly started proxy effective for an already-running Codex."""

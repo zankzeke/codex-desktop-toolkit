@@ -130,13 +130,22 @@ def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
     err = stats.get("last_error") or {}
     net = data.get("network", {})
 
+    codex_path = str(codex.get("path") or "unknown")
+    try:
+        from pathlib import Path
+        home = str(Path.home())
+        if home and codex_path.lower().startswith(home.lower()):
+            codex_path = "~" + codex_path[len(home):]
+    except Exception:
+        pass
+
     lines = [
         "# Codex Bridge Toolkit diagnostic report",
         "",
         f"- Toolkit version: {app_version}",
         f"- Codex running: {bool(codex.get('running'))}",
         f"- Codex version: {codex.get('version') or 'unknown'}",
-        f"- Codex executable: {codex.get('path') or 'unknown'}",
+        f"- Codex executable: {codex_path}",
         f"- Config exists: {bool(codex.get('config_exists'))}",
         f"- model_provider: {cfg.get('provider') or 'unknown'}",
         f"- Local provider active for port: {bool(cfg.get('active_for_port'))}",
@@ -165,7 +174,7 @@ def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
         f"- HTTP_PROXY: {net.get('http_proxy') or 'unset'}",
         f"- HTTPS_PROXY: {net.get('https_proxy') or 'unset'}",
         f"- ALL_PROXY: {net.get('all_proxy') or 'unset'}",
-        f"- NO_PROXY: {net.get('no_proxy') or 'unset'}",
+        f"- NO_PROXY: {'set (contents redacted)' if net.get('no_proxy') else 'unset'}",
         "",
         "> Authentication headers, cookies, request bodies, response bodies and URL query strings are intentionally omitted.",
     ]

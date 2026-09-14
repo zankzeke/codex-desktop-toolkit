@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 DEFAULT_THEME = "午夜蓝"
 UI_STATE_PATH = Path.home() / ".codex-toolkit" / "ui.json"
 

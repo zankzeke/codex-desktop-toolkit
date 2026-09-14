@@ -351,6 +351,7 @@ class CodexProxy:
                 if isinstance(resp_obj, dict):
                     resp_obj, _, fixes = rewrite_response_object(resp_obj)
                     if fixes:
+                        self.stats.record_rewrite(fixes, 0)
                         logger.info("response body: %d id fixes", fixes)
                     resp_body = json.dumps(resp_obj, ensure_ascii=False).encode()
             except json.JSONDecodeError:
@@ -468,6 +469,8 @@ class CodexProxy:
                                     
                                 try:
                                     obj, _, f = rewrite_response_object(obj, id_map=id_map)
+                                    if f:
+                                        self.stats.record_rewrite(f, 0)
                                     await ws_client.send_str(json.dumps(obj, ensure_ascii=False))
                                 except Exception as e:
                                     logger.error("WS response sanitize error: %s", type(e).__name__)
