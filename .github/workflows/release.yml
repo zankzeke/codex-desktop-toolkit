@@ -4,21 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag
-        required: true
-        default: v0.4.1
+        description: Optional tag; must match version.py (for example v0.4.2)
+        required: false
+        default: ''
   push:
     branches: [main]
+    paths:
+      - 'version.py'
 
 permissions:
   contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
 
 jobs:
   build-release:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
-    env:
-      DEFAULT_TAG: v0.4.1
     steps:
       - uses: actions/checkout@v4
 
@@ -26,15 +30,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install build dependencies
+      - name: Resolve release version
+        id: version
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          $version = (python -c "from version import APP_VERSION; print(APP_VERSION)").Trim()
+          if (-not $version) { throw "version.py returned an empty version" }
+          $tag = "v$version"
+          $requested = '${{ inputs.tag }}'.Trim()
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch' -and $requested -and $requested -ne $tag) {
+            throw "Requested tag $requested does not match version.py ($tag)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Install locked release dependencies
+        run: python -m pip install -r requirements-release.txt
 
       - name: Run tests before packaging
         run: |
           python -m compileall -q .
-          python -m pip install -r requirements-dev.txt
           python -m pytest -q
 
       - name: Build proxy executable
@@ -58,6 +73,19 @@ jobs:
 
       - name: Smoke-test packaged proxy executable
         run: python tests/packaged_smoke.py --proxy-exe dist/CodexBridgeProxy.exe
+
+      - name: Smoke-test packaged GUI executable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "$PWD/dist/CodexBridgeToolkit.exe" -ArgumentList "--smoke-test" -PassThru
+          if (-not $p.WaitForExit(20000)) {
+            try { $p.Kill() } catch {}
+            throw "Packaged GUI smoke test timed out"
+          }
+          $p.Refresh()
+          if ($p.ExitCode -ne 0) {
+            throw "Packaged GUI smoke test failed with exit code $($p.ExitCode)"
+          }
 
       - name: Optional Authenticode signing
         shell: pwsh
@@ -84,13 +112,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-            $tag = '${{ inputs.tag }}'
-          } else {
-            $tag = $env:DEFAULT_TAG
-          }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          $version = $tag.TrimStart('v')
+          $version = '${{ steps.version.outputs.version }}'
           $dir = "release/CodexBridgeToolkit-$version-windows-x64"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item dist/CodexBridgeToolkit.exe "$dir/CodexBridgeToolkit.exe"
@@ -99,27 +121,23 @@ jobs:
           Copy-Item docs/PROXY_SETUP_ZH.md "$dir/PROXY_SETUP_ZH.md"
           Copy-Item LICENSE "$dir/LICENSE"
           @"
-          Codex Bridge Toolkit $tag
+          Codex Bridge Toolkit v$version
 
           Start CodexBridgeToolkit.exe.
           Keep CodexBridgeToolkit.exe and CodexBridgeProxy.exe in the same directory.
 
-          v0.4 reliability platform:
-          - Three-layer connection truth: local proxy / Codex provider / verified real traffic
-          - True-direct, system-environment and explicit outbound proxy modes
-          - System tray background mode and safe restore-on-exit
-          - One-click launch/restart Codex through the local compatibility proxy
-          - Safer config restore that refuses to overwrite external edits
-          - Diagnostics center with privacy-safe Markdown report copy
-          - Error classification and WebSocket handshake/reconnect/close-code telemetry
-          - Notification-only GitHub update checks; no silent installation
-          - Packaged EXE smoke testing in CI
-          - SHA256 checksums and optional Authenticode signing when maintainer secrets are configured
-
-          See PROXY_SETUP_ZH.md for common Clash/v2rayN/Mihomo upstream proxy examples.
+          v0.4.2 hardening:
+          - Single authoritative version source
+          - Locked Windows release dependency set
+          - Packaged Proxy + GUI smoke tests before publishing
+          - Exact Responses endpoint detection
+          - Two-phase ID repair including forward references
+          - Correct WebSocket reconnect telemetry for parallel connections
+          - SHA256 checksums and optional Authenticode signing
           "@ | Set-Content -Encoding utf8 "$dir/PORTABLE_README.txt"
-          Compress-Archive -Path "$dir/*" -DestinationPath "release/CodexBridgeToolkit-$version-windows-x64.zip" -Force
-          "zip=release/CodexBridgeToolkit-$version-windows-x64.zip" >> $env:GITHUB_OUTPUT
+          $zip = "release/CodexBridgeToolkit-$version-windows-x64.zip"
+          Compress-Archive -Path "$dir/*" -DestinationPath $zip -Force
+          "zip=$zip" >> $env:GITHUB_OUTPUT
 
       - name: Generate SHA256 checksums
         shell: pwsh
@@ -150,9 +168,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = '${{ steps.package.outputs.tag }}'
+          $tag = '${{ steps.version.outputs.tag }}'
           $zip = '${{ steps.package.outputs.zip }}'
-          $version = $tag.TrimStart('v')
+          $version = '${{ steps.version.outputs.version }}'
           @"
           ## Codex Bridge Toolkit $tag
 
@@ -160,23 +178,15 @@ jobs:
 
           **Recommended:** download `CodexBridgeToolkit-$version-windows-x64.zip`, extract it, and keep both executables together.
 
-          ### v0.4.1 Polish Patch
-          - **Fixed Upstream Dialog**: Resolved a crash when managing upstreams due to a misplaced log-clear control.
-          - **Stale Launch Fix**: Failed validation or proxy startup no longer leaves a stuck "one-click" pending state.
-          - **Response Stats**: Rewrites in regular HTTP and WebSocket response sides are now correctly counted in telemetry.
-          - **Safer Reports**: The copied diagnostic report explicitly redacts the Windows home folder path and does not dump NO_PROXY domain contents.
-
-          ### v0.4 reliability & diagnostics platform
-          - **Three-layer connection truth** — distinguishes local proxy health, Codex provider attachment, and verified real Codex traffic.
-          - **Deterministic outbound networking** — true direct mode ignores proxy environment variables; system-environment and explicit HTTP/Mixed proxy modes are separate choices.
-          - **System tray background mode** — closing the main window can keep the proxy alive; safe exit can restore the previous Codex provider before stopping it.
-          - **One-click launch through proxy** — prepares the proxy/provider and launches or restarts Codex in one flow.
-          - **Safer config restore** — external/manual `config.toml` edits are detected instead of silently overwritten.
-          - **Diagnostics center** — Codex version/provider, last request/status, ID rewrite counts, WebSocket telemetry, error classification, and copyable redacted Markdown report.
-          - **WebSocket observability** — handshake count, follow-up connection/reconnect counter, failures, timestamps and close codes such as 1006/1008/1011.
-          - **Conservative update checks** — notification only; Toolkit never silently downloads or installs a new version.
-          - **Packaged-binary smoke test** — CI exercises the built proxy EXE over health, HTTP, SSE and WebSocket before publishing.
-          - **Release integrity** — `SHA256SUMS.txt` is included. Authenticode signing is optional and only applied when maintainer signing secrets are configured.
+          ### v0.4.2 Repository & Release Hardening
+          - Single version source shared by GUI and release pipeline
+          - Exact locked release/build dependencies
+          - Packaged GUI smoke test in addition to HTTP/SSE/WebSocket proxy smoke tests
+          - Behavior-focused regression tests for the new hardening paths
+          - Correct WebSocket reconnect telemetry with parallel connections
+          - Exact `/v1/responses` matching rather than substring matching
+          - Two-phase ID repair for forward references, including cross-line JSONL history repair
+          - SHA256 integrity file remains included; Authenticode is used when signing secrets are configured
 
           Privacy note: runtime stats are local-only and do not store authentication headers, cookies, request/response bodies, or URL query strings.
 
