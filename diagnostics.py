@@ -62,7 +62,9 @@ def get_codex_process_info() -> dict[str, Any]:
             timeout=4,
         )
         lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-        if lines:
+        # PowerShell itself (or a mocked subprocess in tests) can emit diagnostic
+        # text on stdout. Only a real codex.exe-looking path is authoritative.
+        if lines and lines[0].lower().replace("/", "\\").endswith("\\codex.exe"):
             result["running"] = True
             result["path"] = lines[0]
             if len(lines) > 1:
@@ -71,7 +73,7 @@ def get_codex_process_info() -> dict[str, Any]:
     except Exception:
         pass
 
-    # Fallback to tasklist.  Windows output casing is not stable.
+    # Fallback to tasklist. Windows output casing is not stable.
     try:
         res = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq Codex.exe", "/NH"],
