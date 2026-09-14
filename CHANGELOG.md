@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-09-14
+
+- Fixed starting the local proxy after Codex Desktop is already running.
+- The GUI now checks whether `config.toml` points at the selected local proxy and offers to apply the provider plus restart Codex when required.
+- If the provider already matches, the GUI offers a restart so the existing Codex process reloads its connection state.
+- Enabling the proxy config while Codex is running now offers an immediate restart.
+
 ## 0.3.0 - 2026-09-13
 
 ### ✨ 新特性与优化 (Features & Improvements)

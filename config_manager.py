@@ -79,6 +79,37 @@ def save_proxies(proxies: dict[str, str], selected: str) -> None:
     state["selected_proxy"] = selected
     _save_state(state)
 
+def get_proxy_config_status(port: int | None = None) -> dict:
+    """Read whether Codex currently points at the local id-fix provider."""
+    result = {
+        "config_exists": CONFIG_PATH.exists(), "parse_ok": False,
+        "provider": None, "active": False, "base_url": None,
+        "active_for_port": False,
+    }
+    if not CONFIG_PATH.exists():
+        return result
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            doc = tomlkit.load(f)
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+    provider = str(doc.get("model_provider", "openai"))
+    providers = doc.get("model_providers", {})
+    block = providers.get("openai-idfix", {}) if providers else {}
+    base_url = str(block.get("base_url", "")) if block else ""
+    result.update({
+        "parse_ok": True, "provider": provider,
+        "active": provider == "openai-idfix",
+        "base_url": base_url or None,
+    })
+    if port is None:
+        result["active_for_port"] = result["active"]
+    else:
+        expected = f"http://127.0.0.1:{int(port)}/v1"
+        result["active_for_port"] = result["active"] and base_url.rstrip("/") == expected.rstrip("/")
+    return result
+
 def enable_proxy_config(port: int, ws_enabled: bool) -> Tuple[bool, str]:
     if not CONFIG_PATH.exists():
         return False, f"Config file not found: {CONFIG_PATH}"

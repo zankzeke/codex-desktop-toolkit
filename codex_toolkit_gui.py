@@ -43,7 +43,7 @@ CODEX_EXE_CANDIDATES = [
 
 from history_fixer import fix_rollout_file, fast_check_bad_ids, is_codex_running
 from config_manager import (
-    enable_proxy_config, disable_proxy_config, 
+    enable_proxy_config, disable_proxy_config, get_proxy_config_status,
     load_upstreams, save_upstreams,
     load_proxies, save_proxies
 )
@@ -811,6 +811,69 @@ class ProxyTab(ttk.Frame):
             self._start_btn.config(state=tk.NORMAL)
             self._stop_btn.config(state=tk.DISABLED)
 
+    def _on_proxy_ready(self, port_num: int):
+        """Make a newly started proxy effective for an already-running Codex."""
+        self._set_running(True)
+        status = get_proxy_config_status(port_num)
+
+        if not is_codex_running():
+            if not status.get("active_for_port"):
+                self._append_log(
+                    "[提示] 本地代理已启动，但 Codex 配置尚未指向该代理。请先启用代理配置，再启动 Codex。",
+                    "warn",
+                )
+            return
+
+        if status.get("active_for_port"):
+            if messagebox.askyesno(
+                "需要重启 Codex",
+                "检测到 Codex Desktop 已经在运行。\n\n"
+                "Codex 在启动时会读取 provider/连接状态；仅在运行期间启动本地代理，"
+                "当前进程不一定会热切换到新代理。\n\n"
+                "代理已经正常启动。是否现在重启 Codex，让它立即重新连接本地代理？",
+            ):
+                ok, msg = restart_codex()
+                if ok:
+                    self._append_log(f"[Codex 重启] 已重新加载代理配置: {msg}", "ok")
+                else:
+                    messagebox.showwarning("重启失败", f"{msg}\n\n代理仍在运行，请手动重启 Codex Desktop。")
+            else:
+                self._append_log(
+                    "[提示] 代理已运行，但当前 Codex 可能仍使用启动时的旧连接；重启 Codex 后生效。",
+                    "warn",
+                )
+            return
+
+        if not messagebox.askyesno(
+            "让 Codex 接入代理",
+            "检测到 Codex Desktop 已经在运行，但当前 config.toml 并未指向刚启动的本地代理。\n\n"
+            "只启动 127.0.0.1 的代理服务不会自动改写已经运行的 Codex 连接。\n"
+            "需要写入 openai-idfix provider 并重启 Codex 才能立即生效。\n\n"
+            "是否现在一键启用代理配置并重启 Codex？",
+        ):
+            self._append_log(
+                "[提示] 本地代理已启动，但当前 Codex 尚未接入；启用代理配置并重启后生效。",
+                "warn",
+            )
+            return
+
+        ok, msg = enable_proxy_config(port_num, self._ws_var.get())
+        if not ok:
+            self._append_log(f"[配置错误] {msg}", "error")
+            messagebox.showerror("写入失败", msg)
+            return
+        self._append_log(
+            f"[配置更新] 已自动启用代理配置: 端口 {port_num}, WS={self._ws_var.get()}", "ok"
+        )
+        ok, msg = restart_codex()
+        if ok:
+            self._append_log(f"[Codex 重启] 已接入本地代理: {msg}", "ok")
+        else:
+            messagebox.showwarning(
+                "重启失败",
+                f"代理配置已写入，但自动重启失败：{msg}\n\n请手动重启 Codex Desktop；重启后会使用本地代理。",
+            )
+
     def _start_proxy(self):
         if FROZEN:
             if not PROXY_EXE.exists():
@@ -944,7 +1007,7 @@ class ProxyTab(ttk.Frame):
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1):
                         if not self._app._closing:
-                            self._app.after(0, lambda: self._set_running(True))
+                            self._app.after(0, lambda p=port_num: self._on_proxy_ready(p))
                         return
                 except Exception:
                     time.sleep(0.5)
@@ -1029,7 +1092,21 @@ class ProxyTab(ttk.Frame):
         ok, msg = enable_proxy_config(port, ws_enabled)
         if ok:
             self._append_log(f"[配置更新] 已启用代理配置: 端口 {port}, WS={ws_enabled}", "ok")
-            messagebox.showinfo("成功", "代理配置已写入。\n如果 Codex 正在运行，请重启 Codex Desktop 以生效。")
+            if is_codex_running():
+                if messagebox.askyesno(
+                    "配置已写入，需要重启",
+                    "Codex Desktop 当前正在运行。\n\n运行中的 Codex 不会可靠地热切换 provider。是否现在重启 Codex 立即生效？",
+                ):
+                    r_ok, r_msg = restart_codex()
+                    if r_ok:
+                        self._append_log(f"[Codex 重启] 已重新加载代理配置: {r_msg}", "ok")
+                        messagebox.showinfo("成功", "代理配置已写入，Codex Desktop 已重启并重新加载配置。")
+                    else:
+                        messagebox.showwarning("重启失败", f"代理配置已写入，但自动重启失败：{r_msg}\n\n请手动重启 Codex Desktop。")
+                else:
+                    messagebox.showinfo("成功", "代理配置已写入。当前 Codex 仍可能继续使用旧连接，重启后生效。")
+            else:
+                messagebox.showinfo("成功", "代理配置已写入。下次启动 Codex Desktop 时会使用该代理。")
         else:
             self._append_log(f"[配置错误] {msg}", "error")
             messagebox.showerror("写入失败", msg)
