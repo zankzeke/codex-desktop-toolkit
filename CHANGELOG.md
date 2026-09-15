@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.0 — Network Compatibility & Recovery
+
+- Added **自动 / WebSocket / 强制 HTTP** transport modes for the managed Codex provider.
+- Added one-click network health checks for HTTP, WebSocket, local proxy, config, and real-traffic evidence.
+- Added opt-in WebSocket circuit breaker after three consecutive upstream handshake failures.
+- Added discovery of common local Clash/Mihomo/v2rayN/NekoRay proxy listeners.
+- Added actionable remediation for classified errors.
+- Added session backup history, ID-only diff previews, and atomic rollback.
+- Added privacy-safe support bundle ZIP export.
+- Added Windows startup/background automation and tray notifications.
+- Redacted `NO_PROXY` contents from localhost health details.
+
 ## 0.4.4 - 2026-09-14
 
 - Fixed CodeQL partial-SSRF findings by forwarding only the Codex endpoints the compatibility proxy is expected to handle.

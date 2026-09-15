@@ -273,7 +273,7 @@ class CodexProxy:
                 "http_proxy": self._mask_url(os.environ.get("HTTP_PROXY")),
                 "https_proxy": self._mask_url(os.environ.get("HTTPS_PROXY")),
                 "all_proxy": self._mask_url(os.environ.get("ALL_PROXY")),
-                "no_proxy": os.environ.get("NO_PROXY")
+                "no_proxy": "set (contents redacted)" if os.environ.get("NO_PROXY") else None
             }
         })
 

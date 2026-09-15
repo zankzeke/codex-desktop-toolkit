@@ -29,6 +29,11 @@ The toolkit provides both an **offline JSONL fixer** and a **local live proxy** 
 - `config.toml` editing through `tomlkit`, with automatic backups and provider restore support.
 - Offline session backups and atomic replacement.
 - Multi-theme GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.
+- Transport modes: **自动 / WebSocket / 强制 HTTP**, including an opt-in WS circuit breaker after repeated handshake failures.
+- One-click network health check that distinguishes HTTP reachability, WebSocket path failures, local proxy state, and real Codex traffic evidence.
+- Automatic discovery of common local Clash/Mihomo/v2rayN/NekoRay proxy listeners.
+- Actionable error remediation, session backup history with ID-only diff/rollback, and privacy-safe support bundle export.
+- Optional Windows startup automation: start Toolkit/proxy, apply provider, launch Codex, stop proxy after Codex exits, and tray notifications.
 - Closing the GUI stops the full packaged proxy process tree; stale `CodexBridgeProxy.exe` listeners can be detected and cleaned up on the next start.
 - Optional PowerShell `agy` wrapper that temporarily sets proxy variables and restores the original shell environment afterward.
 
@@ -171,6 +176,8 @@ requires_openai_auth = true
 supports_websockets = true
 ```
 
+The GUI exposes three transport modes. **强制 HTTP** writes `supports_websockets = false`; **自动** and **WebSocket** allow WS. In 自动 mode, the optional circuit breaker can switch future Codex connections to HTTP after three consecutive upstream WS handshake failures and restart Codex only when the user explicitly enabled that automation.
+
 Before changing `config.toml`, the toolkit creates a backup. When you choose **恢复默认直连**, it tries to restore the provider that was active before `openai-idfix`; if that provider no longer exists, it falls back to `openai`.
 
 ## Why malformed reasoning is dropped
@@ -253,6 +260,9 @@ runtime_stats.py       privacy-safe in-memory HTTP/SSE/WebSocket telemetry
 error_classifier.py    human-readable network/upstream error classification
 tray_manager.py        Windows system-tray background lifecycle
 update_checker.py      notification-only GitHub Release update checker
+network_tools.py       transport modes, network health checks, local proxy discovery
+startup_manager.py     Windows login-startup registration
+support_bundle.py      privacy-safe diagnostics/support ZIP export
 process_utils.py       Windows process-tree and listening-port helpers
 start-gui.ps1          GUI bootstrap
 start.ps1              proxy bootstrap
