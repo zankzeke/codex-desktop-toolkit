@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 - 2026-09-15
+
+- **Transport Mode Selection**: Added Auto / WebSocket / Force HTTP transport modes configurable via GUI, `config_manager.py`, and `--transport-mode` proxy CLI. Force HTTP mode gracefully rejects WebSocket upgrades to trigger immediate Codex client HTTP fallback.
+- **WebSocket Circuit Breaker**: Implemented thread-safe `TransportCircuitBreaker` (CLOSED / OPEN / HALF_OPEN). Automatically trips upon consecutive WebSocket connection failures (default 3) to break infinite reconnect loops, with configurable cooldown (default 15m) and automatic half-open trial probing.
+- **One-Click Network Diagnostics**: Added comprehensive connectivity evaluation testing local proxy health, upstream HTTPS reachability, and WebSocket handshake performance concurrently without sending credentials or chat transcripts. Provides structured conclusions and actionable repair suggestions.
+- **Local Proxy Discovery**: Automatically scans and detects active local proxy applications (Clash Verge Rev, Clash, Mihomo, v2rayN, NekoRay, sing-box) by listening ports and process signatures, with live HTTP and WebSocket capability testing and one-click filling into outbound proxy settings.
+- **Actionable Error Classifier**: Enhanced `error_classifier.py` to produce structured `ErrorDiagnosis` objects with categorized recommendations and `action_id` dispatch (navigating directly to session repair, network diagnostics, force HTTP, or proxy discovery).
+- **Session Repair Center & Atomic Rollback**: Added `backup_manager.py` featuring backup history enumeration, privacy-preserving structured diffs (comparing line counts, item modifications, and fix counts without exposing conversation content), and atomic rollback with process conflict detection.
+- **Sanitized Support Bundle**: Added `support_bundle.py` generating `CodexBridgeSupport-YYYYMMDD-HHMMSS.zip` diagnostics bundles with strict multi-layer redaction of usernames, home paths, tokens, authorization headers, cookies, and request bodies.
+- **Startup & Automation Preferences**: Added `startup_manager.py` for per-user Windows HKCU Run key auto-start (no administrator elevation required), rate-limited desktop notifications, and persistent automation preferences.
+- **GUI Reorganization**: Structured the toolkit into 7 comprehensive tabs: 首页概览 (Overview), 代理控制 (Proxy Control), 会话修复 (Session Repair), 网络诊断 (Network Diagnostics), Antigravity 网络, 诊断与支持 (Diagnostics & Support), and 设置 (Settings).
+
 ## 0.4.4 - 2026-09-14
 
 - Fixed CodeQL partial-SSRF findings by forwarding only the Codex endpoints the compatibility proxy is expected to handle.

@@ -189,12 +189,21 @@ def _sanitise_request_body(
 
 
 class CodexProxy:
-    def __init__(self, upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None, proxy_mode: str = "direct") -> None:
+    def __init__(
+        self,
+        upstream_base: str,
+        reasoning_mode: str,
+        port: int,
+        upstream_proxy: str | None = None,
+        proxy_mode: str = "direct",
+        transport_mode: str = "auto",
+    ) -> None:
         self.upstream_base = upstream_base.rstrip("/")
         self.reasoning_mode = reasoning_mode
         self.port = port
         self.upstream_proxy = upstream_proxy
         self.proxy_mode = proxy_mode
+        self.transport_mode = transport_mode.lower().strip() if transport_mode else "auto"
         self.stats = RuntimeStats()
         self._session: aiohttp.ClientSession | None = None
 
@@ -265,7 +274,9 @@ class CodexProxy:
         return web.json_response({
             "status": "ok",
             "upstream": self._mask_url(self.upstream_base),
-            "websocket_supported": True,
+            "websocket_supported": self.transport_mode != "http",
+            "transport_mode": self.transport_mode,
+            "circuit_breaker": self.stats.circuit_breaker.snapshot(self.transport_mode),
             "reasoning_mode": self.reasoning_mode,
             "proxy_mode": self.proxy_mode,
             "upstream_proxy": self._mask_url(self.upstream_proxy) if self.proxy_mode == "explicit" else None,
@@ -410,6 +421,10 @@ class CodexProxy:
     async def _proxy_websocket(
         self, request: web.Request, upstream_url: str, headers: dict[str, str]
     ) -> web.WebSocketResponse:
+
+        if not self.stats.circuit_breaker.should_allow_websocket(self.transport_mode):
+            logger.info("[WS ] circuit breaker open or mode is HTTP, fast-rejecting WS handshake to trigger HTTP fallback")
+            return web.Response(status=503, text="WebSocket circuit breaker open or disabled, fallback to HTTP")
 
         if upstream_url.startswith("https://"):
             upstream_url = "wss://" + upstream_url[8:]
@@ -646,8 +661,22 @@ class CodexProxy:
 # ---------------------------------------------------------------------------
 
 
-def make_app(upstream_base: str, reasoning_mode: str, port: int, upstream_proxy: str | None = None, proxy_mode: str = "direct") -> web.Application:
-    proxy = CodexProxy(upstream_base=upstream_base, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy, proxy_mode=proxy_mode)
+def make_app(
+    upstream_base: str,
+    reasoning_mode: str,
+    port: int,
+    upstream_proxy: str | None = None,
+    proxy_mode: str = "direct",
+    transport_mode: str = "auto",
+) -> web.Application:
+    proxy = CodexProxy(
+        upstream_base=upstream_base,
+        reasoning_mode=reasoning_mode,
+        port=port,
+        upstream_proxy=upstream_proxy,
+        proxy_mode=proxy_mode,
+        transport_mode=transport_mode,
+    )
 
     async def _startup(app: web.Application) -> None:
         await proxy.startup()
@@ -677,6 +706,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--upstream", default=os.environ.get("PROXY_UPSTREAM", DEFAULT_UPSTREAM))
     p.add_argument("--upstream-proxy", default=os.environ.get("PROXY_UPSTREAM_PROXY", None), help="HTTP proxy URL used when --proxy-mode=explicit")
     p.add_argument("--proxy-mode", choices=["direct", "env", "explicit"], default=os.environ.get("PROXY_MODE", "direct"), help="Outbound networking: true direct, system environment proxy, or explicit proxy URL")
+    p.add_argument("--transport-mode", choices=["auto", "websocket", "http"], default=os.environ.get("PROXY_TRANSPORT_MODE", "auto"), help="Transport policy: auto, websocket, or http")
     p.add_argument(
         "--reasoning-mode",
         default=os.environ.get("PROXY_REASONING_MODE", DEFAULT_REASONING_MODE),
@@ -714,6 +744,7 @@ def main() -> None:
     if upstream_proxy and proxy_mode == "direct":
         proxy_mode = "explicit"  # backwards-compatible CLI behaviour
     reasoning_mode: str = args.reasoning_mode
+    transport_mode: str = args.transport_mode
 
     if not (1 <= port <= 65535):
         raise SystemExit("--port must be between 1 and 65535")
@@ -731,12 +762,21 @@ def main() -> None:
     if proxy_mode == "explicit" and upstream_proxy:
         print(f"  Proxy:     {_mask_url(upstream_proxy)}")
     print(f"  Reasoning mode: {reasoning_mode}")
+    print(f"  Transport: {transport_mode}")
     print("=" * 60)
     print(f"  Health check: http://127.0.0.1:{port}/health")
     print("=" * 60)
 
-    app = make_app(upstream_base=upstream, reasoning_mode=reasoning_mode, port=port, upstream_proxy=upstream_proxy, proxy_mode=proxy_mode)
+    app = make_app(
+        upstream_base=upstream,
+        reasoning_mode=reasoning_mode,
+        port=port,
+        upstream_proxy=upstream_proxy,
+        proxy_mode=proxy_mode,
+        transport_mode=transport_mode,
+    )
     web.run_app(app, host="127.0.0.1", port=port, access_log=None)
+
 
 
 if __name__ == "__main__":

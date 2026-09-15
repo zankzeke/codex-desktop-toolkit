@@ -47,7 +47,9 @@ from history_fixer import fix_rollout_file, fast_check_bad_ids, is_codex_running
 from config_manager import (
     enable_proxy_config, disable_proxy_config, get_proxy_config_status,
     load_upstreams, save_upstreams,
-    load_proxies, save_proxies, ENV_PROXY_SENTINEL
+    load_proxies, save_proxies, ENV_PROXY_SENTINEL,
+    get_transport_mode, set_transport_mode,
+    get_circuit_breaker_config, save_circuit_breaker_config,
 )
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
 from ui_theme import ThemeManager
@@ -60,6 +62,16 @@ from process_utils import (
     terminate_process_tree,
     wait_for_port_free,
 )
+from transport_policy import GLOBAL_CIRCUIT_BREAKER, CircuitState
+from network_diagnostics import run_full_diagnostics, evaluate_diagnostics, mask_url_sensitive
+from proxy_discovery import discover_proxies, test_proxy_http, test_proxy_ws, DiscoveredProxy
+from backup_manager import list_session_backups, compute_structured_diff, rollback_session
+from support_bundle import create_support_bundle
+from startup_manager import (
+    GLOBAL_STARTUP_MANAGER, GLOBAL_NOTIFIER,
+    load_automation_settings, save_automation_settings, AutomationSettings
+)
+from error_classifier import ErrorDiagnosis, classify_error, classify_ws_close
 
 
 def load_thread_index():
@@ -184,21 +196,39 @@ class App(tk.Tk):
             self._restore_from_tray, self._exit_and_restore,
         )
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        self._session_tab = SessionTab(nb, self)
-        self._proxy_tab = ProxyTab(nb, self)
-        self._agy_tab = AgyTab(nb, self)
-        self._diag_tab = DiagnosticsTab(nb, self)
-        nb.add(self._session_tab, text="  🔧 会话修复  ")
-        nb.add(self._proxy_tab, text="  🔌 代理控制  ")
-        nb.add(self._agy_tab, text="  🚀 Antigravity 网络  ")
-        nb.add(self._diag_tab, text="  🩺 运行诊断  ")
+        self._overview_tab = OverviewTab(self.notebook, self)
+        self._proxy_tab = ProxyTab(self.notebook, self)
+        self._session_tab = SessionTab(self.notebook, self)
+        self._net_tab = NetworkDiagnosticsTab(self.notebook, self)
+        self._agy_tab = AgyTab(self.notebook, self)
+        self._diag_tab = DiagnosticsTab(self.notebook, self)
+        self._settings_tab = SettingsTab(self.notebook, self)
+
+        self.notebook.add(self._overview_tab, text="  🏠 首页概览  ")
+        self.notebook.add(self._proxy_tab, text="  🔌 代理控制  ")
+        self.notebook.add(self._session_tab, text="  🔧 会话修复  ")
+        self.notebook.add(self._net_tab, text="  🌐 网络诊断  ")
+        self.notebook.add(self._agy_tab, text="  🚀 Antigravity 网络  ")
+        self.notebook.add(self._diag_tab, text="  🩺 诊断与支持  ")
+        self.notebook.add(self._settings_tab, text="  ⚙️ 设置  ")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(0, self._theme_manager.refresh_widgets)
         self.after(1800, self._check_updates_background)
+
+        # Automation check: auto-start proxy if enabled
+        auto_settings = load_automation_settings()
+        if auto_settings.auto_start_proxy:
+            self.after(600, self._proxy_tab._start_proxy)
+
+    def select_tab(self, tab):
+        try:
+            self.notebook.select(tab)
+        except Exception:
+            pass
 
     def _apply_style(self, style: ttk.Style):
         bg = "#1e1e2e"
@@ -321,6 +351,168 @@ class App(tk.Tk):
             webbrowser.open(result.get("release_url") or "https://github.com/zankzeke/codex-desktop-toolkit/releases")
 
 
+class OverviewTab(ttk.Frame):
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self._app = app
+        self._build()
+
+    def _build(self):
+        # Header banner
+        header = ttk.Frame(self)
+        header.pack(fill=tk.X, padx=16, pady=(16, 8))
+        ttk.Label(
+            header,
+            text=f"Codex Bridge Toolkit v{APP_VERSION}",
+            font=("Segoe UI", 14, "bold"),
+            foreground=self._app.palette["accent"],
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            header,
+            text="Codex 网络兼容 + 自动诊断 + 自动恢复控制台",
+            foreground=self._app.palette["muted"],
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+        # Three-layer status card frame
+        status_box = ttk.LabelFrame(self, text=" 实时连接状态（三层判定） ")
+        status_box.pack(fill=tk.X, padx=16, pady=8)
+
+        cards = ttk.Frame(status_box)
+        cards.pack(fill=tk.X, padx=12, pady=12)
+        for i in range(3):
+            cards.columnconfigure(i, weight=1)
+
+        # Layer 1: Local Proxy
+        c1 = ttk.LabelFrame(cards, text=" 1. 本地代理服务 ")
+        c1.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
+        self._l1_dot = ttk.Label(c1, text="● 未运行", font=("Segoe UI", 11, "bold"), foreground=self._app.palette["muted"])
+        self._l1_dot.pack(anchor=tk.W, padx=10, pady=(8, 2))
+        self._l1_desc = ttk.Label(c1, text="127.0.0.1 端口未监听", foreground=self._app.palette["muted"])
+        self._l1_desc.pack(anchor=tk.W, padx=10, pady=(0, 8))
+
+        # Layer 2: Codex Provider
+        c2 = ttk.LabelFrame(cards, text=" 2. Codex 配置接入 ")
+        c2.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
+        self._l2_dot = ttk.Label(c2, text="● 未接入", font=("Segoe UI", 11, "bold"), foreground=self._app.palette["muted"])
+        self._l2_dot.pack(anchor=tk.W, padx=10, pady=(8, 2))
+        self._l2_desc = ttk.Label(c2, text="config.toml 指向官方或未生效", foreground=self._app.palette["muted"])
+        self._l2_desc.pack(anchor=tk.W, padx=10, pady=(0, 8))
+
+        # Layer 3: Verified Traffic
+        c3 = ttk.LabelFrame(cards, text=" 3. 真实流量捕获 ")
+        c3.grid(row=0, column=2, sticky="nsew", padx=6, pady=4)
+        self._l3_dot = ttk.Label(c3, text="● 未收到流量", font=("Segoe UI", 11, "bold"), foreground=self._app.palette["muted"])
+        self._l3_dot.pack(anchor=tk.W, padx=10, pady=(8, 2))
+        self._l3_desc = ttk.Label(c3, text="尚未检测到 Codex 业务请求", foreground=self._app.palette["muted"])
+        self._l3_desc.pack(anchor=tk.W, padx=10, pady=(0, 8))
+
+        # Transport & WS health card
+        trans_box = ttk.LabelFrame(self, text=" 传输模式与 WebSocket 健康状况 ")
+        trans_box.pack(fill=tk.X, padx=16, pady=8)
+
+        t_inner = ttk.Frame(trans_box)
+        t_inner.pack(fill=tk.X, padx=12, pady=10)
+        self._trans_mode_lbl = ttk.Label(
+            t_inner,
+            text="当前模式: 自动 (Auto) | 熔断状态: CLOSED",
+            font=("Segoe UI", 10, "bold"),
+            foreground=self._app.palette["fg"],
+        )
+        self._trans_mode_lbl.pack(anchor=tk.W)
+
+        self._trans_detail_lbl = ttk.Label(
+            t_inner,
+            text="WebSocket 运行正常 (CLOSED)",
+            foreground=self._app.palette["muted"],
+        )
+        self._trans_detail_lbl.pack(anchor=tk.W, pady=(4, 0))
+
+        # Quick Actions
+        actions_box = ttk.LabelFrame(self, text=" 快捷控制 ")
+        actions_box.pack(fill=tk.X, padx=16, pady=8)
+
+        btn_row = ttk.Frame(actions_box)
+        btn_row.pack(fill=tk.X, padx=12, pady=12)
+
+        ttk.Button(
+            btn_row,
+            text="🚀 一键通过代理启动 Codex",
+            style="Accent.TButton",
+            command=lambda: self._app._proxy_tab._launch_codex_via_proxy(),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(
+            btn_row,
+            text="🌐 开始网络体检",
+            command=self._go_net_diag,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(
+            btn_row,
+            text="🔧 扫描会话并修复",
+            command=self._go_scan_sessions,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(
+            btn_row,
+            text="⏹ 停止代理",
+            style="Danger.TButton",
+            command=lambda: self._app._proxy_tab._stop_proxy(),
+        ).pack(side=tk.RIGHT)
+
+    def _go_net_diag(self):
+        self._app.select_tab(self._app._net_tab)
+        self._app._net_tab.start_diagnostics()
+
+    def _go_scan_sessions(self):
+        self._app.select_tab(self._app._session_tab)
+        self._app._session_tab._scan()
+
+    def update_status(
+        self,
+        local_running: bool,
+        config_active: bool,
+        traffic_verified: bool,
+        port: str,
+        requests_count: int,
+        transport_mode: str,
+        cb_snap: dict,
+    ):
+        palette = self._app.palette
+        # Layer 1
+        if local_running:
+            self._l1_dot.config(text=f"● 已运行 (:{port})", foreground=palette["success"])
+            self._l1_desc.config(text="本地代理服务正常监听", foreground=palette["fg"])
+        else:
+            self._l1_dot.config(text="● 未运行", foreground=palette["muted"])
+            self._l1_desc.config(text="本地代理服务已停止", foreground=palette["muted"])
+
+        # Layer 2
+        if config_active:
+            self._l2_dot.config(text="● 已接入", foreground=palette["success"])
+            self._l2_desc.config(text="Codex provider 指向 openai-idfix", foreground=palette["fg"])
+        else:
+            self._l2_dot.config(text="● 未接入", foreground=palette["warn"])
+            self._l2_desc.config(text="未接入本地代理或外部修改", foreground=palette["muted"])
+
+        # Layer 3
+        if traffic_verified:
+            self._l3_dot.config(text=f"● 流量已验证 ({requests_count} 请求)", foreground=palette["success"])
+            self._l3_desc.config(text="Codex 真实流量已切实经过代理", foreground=palette["fg"])
+        elif local_running and config_active:
+            self._l3_dot.config(text="○ 等待流量", foreground=palette["warn"])
+            self._l3_desc.config(text="已就绪，等待 Codex 发送首次请求", foreground=palette["muted"])
+        else:
+            self._l3_dot.config(text="● 未收到流量", foreground=palette["muted"])
+            self._l3_desc.config(text="尚未检测到真实请求", foreground=palette["muted"])
+
+        # Transport & WS health
+        t_label = {"auto": "自动 (Auto)", "websocket": "强制 WebSocket", "http": "强制 HTTP"}.get(transport_mode, transport_mode)
+        status_text = cb_snap.get("status_text") or "正常"
+        self._trans_mode_lbl.config(text=f"当前传输模式: {t_label} | 熔断状态: {cb_snap.get('state', 'CLOSED')}")
+        self._trans_detail_lbl.config(text=status_text)
+
+
 class SessionTab(ttk.Frame):
     def __init__(self, parent, app: App):
         super().__init__(parent)
@@ -378,6 +570,135 @@ class SessionTab(ttk.Frame):
                         variable=self._restart_var).pack(side=tk.LEFT)
         self._status_lbl = ttk.Label(bottom, text="就绪", foreground=self._app.palette["success"])
         self._status_lbl.pack(side=tk.RIGHT)
+
+        # ── 会话备份与回滚历史 ───────────────────────────────────
+        bak_frame = ttk.LabelFrame(self, text=" 会话修复历史与一键回滚 (Backup & Rollback) ")
+        bak_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+
+        b_top = ttk.Frame(bak_frame)
+        b_top.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(b_top, text="历史备份列表（修改前自动创建）：", foreground=self._app.palette["muted"]).pack(side=tk.LEFT)
+        ttk.Button(b_top, text="🔄 刷新备份", command=self._refresh_backups).pack(side=tk.RIGHT)
+        ttk.Button(b_top, text="⏪ 恢复此版本", style="Danger.TButton", command=self._rollback_selected_backup).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(b_top, text="🔍 查看变更 (Diff)", command=self._show_backup_diff).pack(side=tk.RIGHT, padx=(0, 6))
+
+        b_tree_frame = ttk.Frame(bak_frame)
+        b_tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+
+        b_cols = ("session", "time", "size", "status")
+        self._bak_tree = ttk.Treeview(b_tree_frame, columns=b_cols, show="headings", height=4)
+        self._bak_tree.heading("session", text="原始会话文件名")
+        self._bak_tree.heading("time", text="备份时间")
+        self._bak_tree.heading("size", text="大小")
+        self._bak_tree.heading("status", text="原文件状态")
+
+        self._bak_tree.column("session", width=320, anchor=tk.W)
+        self._bak_tree.column("time", width=160, anchor=tk.CENTER)
+        self._bak_tree.column("size", width=80, anchor=tk.CENTER)
+        self._bak_tree.column("status", width=120, anchor=tk.CENTER)
+
+        b_vsb = ttk.Scrollbar(b_tree_frame, orient=tk.VERTICAL, command=self._bak_tree.yview)
+        self._bak_tree.configure(yscrollcommand=b_vsb.set)
+        self._bak_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        b_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._backups_cache: list[dict] = []
+        self.after(300, self._refresh_backups)
+
+    def _refresh_backups(self):
+        for item in self._bak_tree.get_children():
+            self._bak_tree.delete(item)
+        self._backups_cache = list_session_backups()
+        for idx, b in enumerate(self._backups_cache):
+            st = "存在" if b["original_exists"] else "已移除"
+            sz = f"{b['size_bytes'] / 1024:.1f} KB"
+            self._bak_tree.insert("", tk.END, iid=str(idx), values=(b["session_name"], b["timestamp"], sz, st))
+
+    def _show_backup_diff(self):
+        sel = self._bak_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在下方备份列表中选中一个备份版本。")
+            return
+        idx = int(sel[0])
+        if idx >= len(self._backups_cache):
+            return
+        item = self._backups_cache[idx]
+        cur_p = Path(item["original_path"])
+        bak_p = Path(item["backup_path"])
+
+        diff = compute_structured_diff(cur_p, bak_p)
+
+        top = tk.Toplevel(self)
+        top.title(f"会话结构变更 — {diff.session_file}")
+        top.geometry("640x480")
+        top.transient(self)
+        self._app._proxy_tab._center_window(top, self)
+
+        pad = ttk.Frame(top, padding=12)
+        pad.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(pad, text=f"会话变更对比: {diff.session_file}", font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
+        ttk.Label(pad, text=f"修复 ID 处数: {len(diff.id_changes)}   |   清理旧 reasoning 处数: {diff.reasoning_drops}", foreground=self._app.palette["accent"]).pack(anchor=tk.W, pady=(2, 8))
+
+        st = scrolledtext.ScrolledText(pad, bg=self._app.palette["surface"], fg=self._app.palette["fg"], font=("Consolas", 9), relief=tk.FLAT)
+        st.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        lines = ["[ID 修复详情]"]
+        if diff.id_changes:
+            for c in diff.id_changes:
+                lines.append(f"  • item id: {c['old_id']} -> {c['new_id']}")
+        else:
+            lines.append("  (无直接 ID 前缀修复)")
+
+        if diff.reference_changes:
+            lines.append("\n[引用修复详情]")
+            for r in diff.reference_changes:
+                lines.append(f"  • reference: {r['old_ref']} -> {r['new_ref']}")
+
+        if diff.reasoning_drops:
+            lines.append(f"\n[Reasoning 净化]\n  • 移除了 {diff.reasoning_drops} 处不合规或未签名的合成 reasoning 节点")
+
+        lines.append("\n------------------------------------------------------------")
+        lines.append("[隐私说明] 本对比仅展示结构 ID 变更，未包含任何用户聊天文本正文。")
+
+        st.insert(tk.END, "\n".join(lines))
+        st.config(state=tk.DISABLED)
+
+        ttk.Button(pad, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+
+    def _rollback_selected_backup(self):
+        sel = self._bak_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在下方备份列表中选中一个备份版本。")
+            return
+        idx = int(sel[0])
+        if idx >= len(self._backups_cache):
+            return
+        item = self._backups_cache[idx]
+        cur_p = Path(item["original_path"])
+        bak_p = Path(item["backup_path"])
+
+        if is_codex_running():
+            messagebox.showerror(
+                "Codex 运行中",
+                "Codex Desktop 当前正在运行。\n\n为避免会话写入冲突与数据丢失，必须先退出 Codex 后才能执行回滚操作。"
+            )
+            return
+
+        if not messagebox.askyesno(
+            "确认回滚",
+            f"确定要将会话恢复至备份版本吗？\n\n会话：{item['session_name']}\n备份时间：{item['timestamp']}\n\nToolkit 会在回滚前自动创建当前状态的安全备份。"
+        ):
+            return
+
+        ok, msg = rollback_session(cur_p, bak_p)
+        if ok:
+            messagebox.showinfo("回滚完成", msg)
+            self._refresh_backups()
+            self._scan()
+        else:
+            messagebox.showerror("回滚失败", msg)
+
 
     def _on_click(self, event):
         region = self._tree.identify_region(event.x, event.y)
@@ -579,16 +900,41 @@ class ProxyTab(ttk.Frame):
         self._upstream_url_lbl.pack(side=tk.LEFT, padx=(0, 4))
 
         # ── Codex config.toml 注入区 ──────────────────────────────
-        toml_frame = ttk.LabelFrame(self, text=" Codex 配置文件 (config.toml) ")
+        toml_frame = ttk.LabelFrame(self, text=" Codex 配置文件 (config.toml) & 传输策略 ")
         toml_frame.pack(fill=tk.X, padx=12, pady=6)
 
         row_toml = ttk.Frame(toml_frame)
         row_toml.pack(fill=tk.X, padx=10, pady=(8, 8))
 
-        ttk.Label(row_toml, text="一键将上面的代理配置写入 Codex Desktop：").pack(side=tk.LEFT)
-        
-        self._ws_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row_toml, text="支持 WebSocket", variable=self._ws_var).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(row_toml, text="传输模式：").pack(side=tk.LEFT)
+        current_tm = get_transport_mode()
+        tm_map = {"auto": "自动 (默认)", "websocket": "WebSocket (保持)", "http": "强制 HTTP"}
+        self._transport_mode_var = tk.StringVar(value=tm_map.get(current_tm, "自动 (默认)"))
+        self._transport_cb = ttk.Combobox(
+            row_toml, textvariable=self._transport_mode_var,
+            values=["自动 (默认)", "WebSocket (保持)", "强制 HTTP"],
+            state="readonly", width=16
+        )
+        self._transport_cb.pack(side=tk.LEFT, padx=(0, 10))
+        self._transport_cb.bind("<<ComboboxSelected>>", self._on_transport_mode_changed)
+
+        self._ws_var = tk.BooleanVar(value=current_tm != "http")
+
+        cb_cfg = get_circuit_breaker_config()
+        self._cb_enabled_var = tk.BooleanVar(value=cb_cfg.get("enabled", True))
+        ttk.Checkbutton(
+            row_toml, text="自动熔断", variable=self._cb_enabled_var,
+            command=self._on_circuit_config_changed
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self._cooldown_var = tk.StringVar(value=f"{cb_cfg.get('cooldown_minutes', 15)} 分钟")
+        self._cooldown_cb = ttk.Combobox(
+            row_toml, textvariable=self._cooldown_var,
+            values=["5 分钟", "15 分钟", "30 分钟"],
+            state="readonly", width=8
+        )
+        self._cooldown_cb.pack(side=tk.LEFT, padx=(0, 12))
+        self._cooldown_cb.bind("<<ComboboxSelected>>", self._on_circuit_config_changed)
 
         ttk.Button(row_toml, text="✅ 启用代理配置", command=self._enable_proxy_config).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(row_toml, text="❌ 恢复默认直连", command=self._disable_proxy_config).pack(side=tk.LEFT, padx=5)
@@ -976,6 +1322,73 @@ class ProxyTab(ttk.Frame):
                 text="代理健康检查通过并不代表 Codex 已走代理；收到真实 Codex 请求后此项才会变绿。" if healthy else "等待代理启动…",
                 foreground=palette["muted"],
             )
+
+        # Update OverviewTab
+        cb_snap = stats.get("circuit_breaker") or GLOBAL_CIRCUIT_BREAKER.snapshot(get_transport_mode())
+        if hasattr(self._app, "_overview_tab"):
+            self._app._overview_tab.update_status(
+                local_running=healthy,
+                config_active=bool(cfg.get("active_for_port")),
+                traffic_verified=bool(stats.get("traffic_verified")),
+                port=str(self._port_var.get()),
+                requests_count=int(stats.get("requests_total", 0)),
+                transport_mode=get_transport_mode(),
+                cb_snap=cb_snap,
+            )
+
+        # Automation checks
+        auto_cfg = load_automation_settings()
+        if auto_cfg.windows_notifications:
+            if healthy and stats.get("traffic_verified"):
+                GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", "Codex 已通过本地代理建立连接", key="traffic_ok")
+            if cb_snap.get("state") == "OPEN":
+                GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", "WebSocket 连续失败，已临时切换 HTTP", key="circuit_open")
+
+        if auto_cfg.auto_stop_proxy_on_exit and healthy:
+            codex_running = is_codex_running()
+            if getattr(self, "_had_codex_running", False) and not codex_running:
+                self._stop_proxy()
+            self._had_codex_running = codex_running
+
+    def _on_transport_mode_changed(self, event=None):
+        val = self._transport_mode_var.get()
+        mode = "auto"
+        if "WebSocket" in val:
+            mode = "websocket"
+        elif "HTTP" in val:
+            mode = "http"
+
+        self._ws_var.set(mode != "http")
+        ok, msg = set_transport_mode(mode)
+        self._append_log(f"[传输模式] {msg}", "info" if ok else "warn")
+
+        if is_codex_running():
+            if messagebox.askyesno(
+                "传输模式已更新",
+                f"传输模式已切换为「{val}」。\n\nCodex Desktop 正在运行，必须重启 Codex 才能生效。\n\n是否立即重启 Codex？"
+            ):
+                restart_codex()
+
+    def _on_circuit_config_changed(self, event=None):
+        cd_str = self._cooldown_var.get().replace(" 分钟", "").strip()
+        try:
+            cd_min = int(cd_str)
+        except ValueError:
+            cd_min = 15
+        cfg = {
+            "enabled": self._cb_enabled_var.get(),
+            "action_mode": "auto_switch",
+            "cooldown_minutes": cd_min,
+            "failure_threshold": 3,
+        }
+        save_circuit_breaker_config(cfg)
+        GLOBAL_CIRCUIT_BREAKER.configure(
+            enabled=cfg["enabled"],
+            cooldown_minutes=cd_min,
+            threshold=3,
+        )
+        self._append_log(f"[熔断配置] 已更新: 启用={cfg['enabled']}, 冷却={cd_min}分钟", "info")
+
 
     def _activate_and_launch_codex(self, port_num: int):
         ok, msg = enable_proxy_config(port_num, self._ws_var.get())
@@ -1414,8 +1827,18 @@ class DiagnosticsTab(ttk.Frame):
         top.pack(fill=tk.X, padx=12, pady=(12, 6))
         ttk.Label(top, text="诊断中心", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
         ttk.Button(top, text="检查更新", command=self._check_update).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(top, text="📦 生成脱敏支持包", style="Accent.TButton", command=self._generate_support_bundle).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(top, text="复制脱敏报告", command=self._copy_report).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(top, text="刷新诊断", command=self._refresh).pack(side=tk.RIGHT)
+
+        # Error action card
+        self._err_card = ttk.LabelFrame(self, text=" ⚠️ 最近异常诊断与推荐操作 ")
+        self._err_title = ttk.Label(self._err_card, text="", font=("Segoe UI", 10, "bold"))
+        self._err_title.pack(anchor=tk.W, padx=10, pady=(6, 2))
+        self._err_desc = ttk.Label(self._err_card, text="", wraplength=800, justify=tk.LEFT)
+        self._err_desc.pack(anchor=tk.W, padx=10, pady=(0, 4))
+        self._err_btn = ttk.Button(self._err_card, text="", style="Accent.TButton")
+        self._err_btn.pack(anchor=tk.W, padx=10, pady=(0, 8))
 
         self._text = scrolledtext.ScrolledText(
             self, bg=self._app.palette["surface"], fg=self._app.palette["fg"],
@@ -1498,6 +1921,61 @@ class DiagnosticsTab(ttk.Frame):
         self._text.insert(tk.END, "\n".join(out))
         self._text.config(state=tk.DISABLED)
 
+        # Update dynamic error action card
+        if err and err.get("category") and err.get("category") != "ok":
+            self._err_card.pack(fill=tk.X, padx=12, pady=(0, 6), before=self._text)
+            self._err_title.config(text=f"[{err.get('category', '异常')}] {err.get('title', '未知异常')}")
+            action_text = err.get("action") or err.get("recommended_action") or "处理"
+            self._err_desc.config(text=f"说明: {err.get('explanation') or err.get('detail') or '-'}\n建议操作: {action_text}")
+            action_id = err.get("action_id", "none")
+            if action_id != "none":
+                self._err_btn.config(text=f"执行建议: {action_text}", command=lambda: self._dispatch_action(action_id))
+                self._err_btn.pack(anchor=tk.W, padx=10, pady=(0, 8))
+            else:
+                self._err_btn.pack_forget()
+        else:
+            self._err_card.pack_forget()
+
+    def _dispatch_action(self, action_id: str):
+        if action_id == "scan_sessions":
+            self._app.select_tab(self._app._session_tab)
+            self._app._session_tab._scan_sessions()
+        elif action_id == "open_net_diagnostics":
+            self._app.select_tab(self._app._net_tab)
+            self._app._net_tab._run_diagnostics()
+        elif action_id == "switch_force_http":
+            self._app.select_tab(self._app._proxy_tab)
+            self._app._proxy_tab._transport_var.set("http")
+            self._app._proxy_tab._on_transport_mode_change()
+            messagebox.showinfo("模式已切换", "传输模式已自动切换为「强制 HTTP」。")
+        elif action_id == "open_proxy_discovery":
+            self._app.select_tab(self._app._net_tab)
+            self._app._net_tab._discover_proxies()
+        elif action_id == "restore_config":
+            self._app.select_tab(self._app._proxy_tab)
+            self._app._proxy_tab._disable_proxy()
+        else:
+            messagebox.showinfo("提示", "当前异常暂无自动修复操作，请参考诊断详情手动处理。")
+
+    def _generate_support_bundle(self):
+        try:
+            port = int(self._app._proxy_tab._port_var.get().strip() or "8787")
+        except ValueError:
+            port = 8787
+        try:
+            zip_path = create_support_bundle(port=port)
+            messagebox.showinfo(
+                "支持包已生成",
+                f"脱敏诊断支持包已成功生成并保存至：\n{zip_path}\n\n该压缩包已严格脱敏，不包含密钥、Token、Cookie 或聊天内容。",
+            )
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(["explorer", f"/select,{zip_path}"], check=False)
+                except Exception:
+                    pass
+        except Exception as exc:
+            messagebox.showerror("生成失败", f"生成诊断支持包时发生错误：\n{exc}")
+
     def _copy_report(self):
         from diagnostics import build_diagnostic_report, get_diagnostics
         if self._last_data is None:
@@ -1528,6 +2006,406 @@ class DiagnosticsTab(ttk.Frame):
             messagebox.showinfo("已是最新", f"当前版本 v{APP_VERSION} 已是最新公开版本。")
 
 
+# ─── 网络诊断 Tab ─────────────────────────────────────────────────────────────
+
+class NetworkDiagnosticsTab(ttk.Frame):
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self._app = app
+        self._discovered: list[DiscoveredProxy] = []
+        self._build()
+
+    def _build(self):
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill=tk.X, padx=12, pady=(12, 6))
+        ttk.Label(toolbar, text="网络诊断与本地代理发现", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+
+        self._run_btn = ttk.Button(toolbar, text="🚀 运行网络体检", style="Accent.TButton", command=self._run_diagnostics)
+        self._run_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self._scan_btn = ttk.Button(toolbar, text="🔍 扫描本地代理软件", command=self._discover_proxies)
+        self._scan_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        # 1. 连通性体检结果
+        diag_frame = ttk.LabelFrame(self, text=" 🌐 上游连通性体检（对比 HTTP vs WebSocket） ")
+        diag_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        status_grid = ttk.Frame(diag_frame)
+        status_grid.pack(fill=tk.X, padx=10, pady=8)
+
+        ttk.Label(status_grid, text="本地代理状态:", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
+        self._lbl_local = ttk.Label(status_grid, text="未检测", foreground="#a6adc8")
+        self._lbl_local.grid(row=0, column=1, sticky=tk.W, padx=(0, 20), pady=2)
+
+        ttk.Label(status_grid, text="上游 HTTPS:", font=("Segoe UI", 9, "bold")).grid(row=0, column=2, sticky=tk.W, padx=4, pady=2)
+        self._lbl_https = ttk.Label(status_grid, text="未检测", foreground="#a6adc8")
+        self._lbl_https.grid(row=0, column=3, sticky=tk.W, padx=(0, 20), pady=2)
+
+        ttk.Label(status_grid, text="WebSocket 握手:", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky=tk.W, padx=4, pady=2)
+        self._lbl_ws = ttk.Label(status_grid, text="未检测", foreground="#a6adc8")
+        self._lbl_ws.grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=2)
+
+        ttk.Label(status_grid, text="系统代理配置:", font=("Segoe UI", 9, "bold")).grid(row=1, column=2, sticky=tk.W, padx=4, pady=2)
+        self._lbl_sys = ttk.Label(status_grid, text="未检测", foreground="#a6adc8")
+        self._lbl_sys.grid(row=1, column=3, sticky=tk.W, padx=(0, 20), pady=2)
+
+        # Conclusion & recommendations
+        rec_frame = ttk.Frame(diag_frame)
+        rec_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self._lbl_conclusion = ttk.Label(rec_frame, text="", wraplength=850, justify=tk.LEFT)
+        self._lbl_conclusion.pack(anchor=tk.W, pady=(2, 4))
+
+        self._action_btn = ttk.Button(rec_frame, text="一键切换为「强制 HTTP」", style="Accent.TButton", command=self._switch_to_force_http)
+
+        # 2. Local Proxy Discovery
+        disc_frame = ttk.LabelFrame(self, text=" 🧭 本地科学上网代理自动发现 ")
+        disc_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        tree_frame = ttk.Frame(disc_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        cols = ("name", "port", "proc", "http_status", "ws_status")
+        self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=5)
+        self._tree.heading("name", text="代理软件 / 标签")
+        self._tree.heading("port", text="端口")
+        self._tree.heading("proc", text="进程 (PID)")
+        self._tree.heading("http_status", text="HTTP 连通性")
+        self._tree.heading("ws_status", text="WebSocket 支持")
+
+        self._tree.column("name", width=180, anchor=tk.W)
+        self._tree.column("port", width=80, anchor=tk.CENTER)
+        self._tree.column("proc", width=160, anchor=tk.W)
+        self._tree.column("http_status", width=200, anchor=tk.W)
+        self._tree.column("ws_status", width=200, anchor=tk.W)
+
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self._tree.yview)
+        self._tree.configure(yscrollcommand=tree_scroll.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        disc_actions = ttk.Frame(disc_frame)
+        disc_actions.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._test_sel_btn = ttk.Button(disc_actions, text="⚡ 测试选中代理", command=self._test_selected_proxy)
+        self._test_sel_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._apply_sel_btn = ttk.Button(disc_actions, text="📥 填入并应用到代理控制", style="Accent.TButton", command=self._apply_selected_proxy)
+        self._apply_sel_btn.pack(side=tk.LEFT)
+
+    def _run_diagnostics(self):
+        self._run_btn.config(state=tk.DISABLED, text="正在体检中...")
+        self._lbl_conclusion.config(text="正在探测本地代理、上游 HTTPS 及 WebSocket 握手，请稍候...", foreground="#89b4fa")
+        self._action_btn.pack_forget()
+
+        try:
+            port = int(self._app._proxy_tab._port_var.get().strip() or "8787")
+        except ValueError:
+            port = 8787
+
+        proxy_mode = self._app._proxy_tab._proxy_mode_var.get()
+        proxy_url = None
+        if proxy_mode == "custom":
+            proxy_url = self._app._proxy_tab._custom_entry.get().strip() or None
+        elif proxy_mode == "env":
+            proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+
+        def worker():
+            try:
+                res = run_full_diagnostics(port=port, proxy_url=proxy_url)
+                self.after(0, lambda: self._on_diagnostics_done(res))
+            except Exception as exc:
+                self.after(0, lambda: self._on_diagnostics_error(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_diagnostics_done(self, res: dict):
+        self._run_btn.config(state=tk.NORMAL, text="🚀 运行网络体检")
+
+        local = res.get("local", {})
+        if local.get("listening") and local.get("health_ok"):
+            self._lbl_local.config(text=f"监听中 ({local.get('latency_ms', 0)}ms)", foreground="#a6e3a1")
+        elif local.get("listening"):
+            self._lbl_local.config(text="端口已监听 (健康端点异常)", foreground="#f9e2af")
+        else:
+            self._lbl_local.config(text="未启动", foreground="#f38ba8")
+
+        https = res.get("https", {})
+        if https.get("ok"):
+            self._lbl_https.config(text=f"正常 ({https.get('total_ms')}ms)", foreground="#a6e3a1")
+        else:
+            err = https.get("error") or "失败"
+            self._lbl_https.config(text=f"异常: {err[:25]}", foreground="#f38ba8")
+
+        ws = res.get("websocket", {})
+        if ws.get("ok"):
+            self._lbl_ws.config(text=f"握手正常 ({ws.get('handshake_ms')}ms)", foreground="#a6e3a1")
+        else:
+            err = ws.get("error") or "失败"
+            self._lbl_ws.config(text=f"握手异常: {err[:25]}", foreground="#f38ba8")
+
+        sys_p = res.get("system_proxy", {})
+        win_p = sys_p.get("windows_settings", {})
+        if win_p.get("proxy_enabled"):
+            self._lbl_sys.config(text=f"系统代理: {win_p.get('proxy_server')}", foreground="#89b4fa")
+        elif sys_p.get("http_proxy") != "unset":
+            self._lbl_sys.config(text=f"环境代理: {sys_p.get('http_proxy')}", foreground="#89b4fa")
+        else:
+            self._lbl_sys.config(text="系统代理未启用 (直连)", foreground="#a6adc8")
+
+        eval_data = res.get("evaluation", {})
+        conclusion = eval_data.get("conclusion", "")
+        recs = eval_data.get("recommendations", [])
+        rec_text = "\n• " + "\n• ".join(recs) if recs else ""
+        self._lbl_conclusion.config(text=f"诊断结论：\n{conclusion}\n\n建议操作：{rec_text}", foreground="#cdd6f4")
+
+        if any("强制 HTTP" in r for r in recs):
+            self._action_btn.pack(anchor=tk.W, pady=(4, 0))
+        else:
+            self._action_btn.pack_forget()
+
+    def _on_diagnostics_error(self, err_msg: str):
+        self._run_btn.config(state=tk.NORMAL, text="🚀 运行网络体检")
+        self._lbl_conclusion.config(text=f"诊断执行异常：\n{err_msg}", foreground="#f38ba8")
+
+    def _switch_to_force_http(self):
+        self._app.select_tab(self._app._proxy_tab)
+        self._app._proxy_tab._transport_var.set("http")
+        self._app._proxy_tab._on_transport_mode_change()
+        messagebox.showinfo("已切换", "传输模式已切换为「强制 HTTP」。")
+
+    def _discover_proxies(self):
+        self._scan_btn.config(state=tk.DISABLED, text="正在扫描...")
+        try:
+            current_port = int(self._app._proxy_tab._port_var.get().strip() or "8787")
+        except ValueError:
+            current_port = 8787
+
+        def worker():
+            found = discover_proxies(exclude_port=current_port)
+            self.after(0, lambda: self._on_proxies_discovered(found))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_proxies_discovered(self, found: list[DiscoveredProxy]):
+        self._scan_btn.config(state=tk.NORMAL, text="🔍 扫描本地代理软件")
+        self._discovered = found
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+
+        if not found:
+            self._tree.insert("", tk.END, values=("未发现正在监听的本地代理软件", "-", "-", "-", "-"))
+            return
+
+        for p in found:
+            proc_str = f"{p.process_name or '未知'} ({p.pid or '-'})"
+            self._tree.insert(
+                "",
+                tk.END,
+                iid=str(p.port),
+                values=(p.name, p.port, proc_str, "待测试", "待测试"),
+            )
+
+    def _test_selected_proxy(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在列表中选中一个代理软件。")
+            return
+        port_str = sel[0]
+        try:
+            port = int(port_str)
+        except ValueError:
+            return
+
+        target_proxy = next((p for p in self._discovered if p.port == port), None)
+        if not target_proxy:
+            return
+
+        self._tree.set(port_str, "http_status", "正在测试 HTTP...")
+        self._tree.set(port_str, "ws_status", "正在测试 WS...")
+
+        def worker():
+            http_ok, http_ms, http_msg = test_proxy_http(target_proxy.proxy_url)
+            ws_ok, ws_ms, ws_msg = test_proxy_ws(target_proxy.proxy_url)
+            self.after(0, lambda: self._on_proxy_test_done(port_str, http_msg, ws_msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_proxy_test_done(self, port_str: str, http_msg: str, ws_msg: str):
+        try:
+            self._tree.set(port_str, "http_status", http_msg)
+            self._tree.set(port_str, "ws_status", ws_msg)
+        except Exception:
+            pass
+
+    def _apply_selected_proxy(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在列表中选中一个代理软件。")
+            return
+        port_str = sel[0]
+        try:
+            port = int(port_str)
+        except ValueError:
+            return
+
+        target_proxy = next((p for p in self._discovered if p.port == port), None)
+        if not target_proxy:
+            return
+
+        proxy_url = target_proxy.proxy_url
+        self._app._proxy_tab._proxy_mode_var.set("custom")
+        self._app._proxy_tab._custom_entry.delete(0, tk.END)
+        self._app._proxy_tab._custom_entry.insert(0, proxy_url)
+        self._app._proxy_tab._on_proxy_mode_change()
+        self._app.select_tab(self._app._proxy_tab)
+        messagebox.showinfo(
+            "已应用代理",
+            f"已将发现的代理软件 [{target_proxy.name}] 地址：\n{proxy_url}\n填入「代理控制」自定义出站代理配置中！",
+        )
+
+
+# ─── 设置 Tab ─────────────────────────────────────────────────────────────────
+
+class SettingsTab(ttk.Frame):
+    def __init__(self, parent, app: App):
+        super().__init__(parent)
+        self._app = app
+        self._build()
+
+    def _build(self):
+        # 1. 开机与自动化设置
+        auto_frame = ttk.LabelFrame(self, text=" ⚡ 系统开机与运行自动化 ")
+        auto_frame.pack(fill=tk.X, padx=12, pady=(12, 8))
+
+        self._startup_var = tk.BooleanVar(value=GLOBAL_STARTUP_MANAGER.is_startup_enabled())
+        self._auto_proxy_var = tk.BooleanVar()
+        self._auto_provider_var = tk.BooleanVar()
+        self._auto_stop_var = tk.BooleanVar()
+        self._notifications_var = tk.BooleanVar()
+
+        auto_cfg = load_automation_settings()
+        self._auto_proxy_var.set(auto_cfg.auto_start_proxy)
+        self._auto_provider_var.set(auto_cfg.auto_apply_provider)
+        self._auto_stop_var.set(auto_cfg.auto_stop_proxy_on_exit)
+        self._notifications_var.set(auto_cfg.windows_notifications)
+
+        ttk.Checkbutton(
+            auto_frame,
+            text="开机自动启动 Toolkit (写入 HKCU Run 注册表，无需管理员权限)",
+            variable=self._startup_var,
+            command=self._toggle_startup,
+        ).pack(anchor=tk.W, padx=12, pady=(8, 4))
+        ttk.Checkbutton(
+            auto_frame,
+            text="Toolkit 启动时自动运行本地代理",
+            variable=self._auto_proxy_var,
+            command=self._save_automation,
+        ).pack(anchor=tk.W, padx=12, pady=4)
+        ttk.Checkbutton(
+            auto_frame,
+            text="代理启动成功后自动注入 provider 到 Codex config.toml",
+            variable=self._auto_provider_var,
+            command=self._save_automation,
+        ).pack(anchor=tk.W, padx=12, pady=4)
+        ttk.Checkbutton(
+            auto_frame,
+            text="退出 Toolkit 时自动停止代理并恢复原始 config.toml 配置",
+            variable=self._auto_stop_var,
+            command=self._save_automation,
+        ).pack(anchor=tk.W, padx=12, pady=4)
+        ttk.Checkbutton(
+            auto_frame,
+            text="启用 Windows 系统通知与气泡提醒 (速率受限，避免频繁打扰)",
+            variable=self._notifications_var,
+            command=self._save_automation,
+        ).pack(anchor=tk.W, padx=12, pady=(4, 8))
+
+        # 2. 熔断器配置
+        cb_frame = ttk.LabelFrame(self, text=" 🛡️ WebSocket 熔断器与容灾设置 ")
+        cb_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        cb_cfg = get_circuit_breaker_config()
+        grid = ttk.Frame(cb_frame)
+        grid.pack(fill=tk.X, padx=12, pady=8)
+
+        ttk.Label(grid, text="连续 WS 失败熔断阈值:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+        self._cb_thresh_var = tk.StringVar(value=str(cb_cfg.get("failure_threshold", 3)))
+        thresh_ent = ttk.Entry(grid, textvariable=self._cb_thresh_var, width=8)
+        thresh_ent.grid(row=0, column=1, sticky=tk.W, padx=4, pady=4)
+        ttk.Label(grid, text="次 (达到后自动跳过 WS 握手，直接降级 HTTP)").grid(row=0, column=2, sticky=tk.W, padx=4, pady=4)
+
+        ttk.Label(grid, text="熔断冷却重试周期:").grid(row=1, column=0, sticky=tk.W, padx=4, pady=4)
+        self._cb_cooldown_var = tk.StringVar(value=str(cb_cfg.get("cooldown_seconds", 900)))
+        cooldown_ent = ttk.Entry(grid, textvariable=self._cb_cooldown_var, width=8)
+        cooldown_ent.grid(row=1, column=1, sticky=tk.W, padx=4, pady=4)
+        ttk.Label(grid, text="秒 (半开探测前等待时间，默认 900 秒 / 15 分钟)").grid(row=1, column=2, sticky=tk.W, padx=4, pady=4)
+
+        cb_btns = ttk.Frame(cb_frame)
+        cb_btns.pack(fill=tk.X, padx=12, pady=(0, 8))
+        ttk.Button(cb_btns, text="保存熔断配置", style="Accent.TButton", command=self._save_cb_config).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(cb_btns, text="重置熔断状态 (恢复 CLOSED)", command=self._reset_cb).pack(side=tk.LEFT)
+
+        self._cb_status_lbl = ttk.Label(cb_btns, text="", foreground="#89b4fa")
+        self._cb_status_lbl.pack(side=tk.LEFT, padx=12)
+
+        # 3. 关于与元数据
+        about_frame = ttk.LabelFrame(self, text=" ℹ️ 关于 Codex Bridge Toolkit ")
+        about_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        about_text = (
+            f"版本：v{APP_VERSION} (Network Compatibility & Recovery)\n"
+            f"项目地址：https://github.com/zankzeke/codex-desktop-toolkit\n"
+            f"运行环境：Python {sys.version.split()[0]} ({sys.platform})\n"
+            f"配置路径：~/.codex/config.toml\n"
+            f"自动化状态：~/.codex-toolkit/state.json"
+        )
+        ttk.Label(about_frame, text=about_text, justify=tk.LEFT, font=("Consolas", 9)).pack(anchor=tk.W, padx=12, pady=8)
+
+        self._refresh_cb_status()
+
+    def _toggle_startup(self):
+        if self._startup_var.get():
+            ok = GLOBAL_STARTUP_MANAGER.enable_startup()
+            if not ok:
+                messagebox.showerror("设置失败", "无法写入开机启动项到注册表。")
+                self._startup_var.set(False)
+        else:
+            GLOBAL_STARTUP_MANAGER.disable_startup()
+        self._save_automation()
+
+    def _save_automation(self):
+        cfg = AutomationSettings(
+            launch_on_startup=self._startup_var.get(),
+            auto_start_proxy=self._auto_proxy_var.get(),
+            auto_apply_provider=self._auto_provider_var.get(),
+            auto_stop_proxy_on_exit=self._auto_stop_var.get(),
+            windows_notifications=self._notifications_var.get(),
+        )
+        save_automation_settings(cfg)
+
+    def _save_cb_config(self):
+        try:
+            thresh = int(self._cb_thresh_var.get().strip())
+            cd = int(self._cb_cooldown_var.get().strip())
+            if thresh < 1 or cd < 1:
+                raise ValueError()
+        except ValueError:
+            messagebox.showerror("参数无效", "阈值与冷却时间必须为大于 0 的整数。")
+            return
+
+        save_circuit_breaker_config(thresh, cd)
+        GLOBAL_CIRCUIT_BREAKER.failure_threshold = thresh
+        GLOBAL_CIRCUIT_BREAKER.cooldown_seconds = cd
+        messagebox.showinfo("已保存", f"熔断配置已更新：失败阈值 {thresh} 次，冷却时间 {cd} 秒。")
+
+    def _reset_cb(self):
+        GLOBAL_CIRCUIT_BREAKER.reset()
+        self._refresh_cb_status()
+        messagebox.showinfo("已重置", "WebSocket 熔断器已重置为 CLOSED 状态。")
+
+    def _refresh_cb_status(self):
+        snap = GLOBAL_CIRCUIT_BREAKER.snapshot()
+        self._cb_status_lbl.config(text=f"当前熔断状态: {snap['state']} (连续失败: {snap.get('consecutive_failures', 0)})")
+        self.after(3000, self._refresh_cb_status)
+
+
 # ─── 入口 ──────────────────────────────────────────────────────────────────────
 
 def run_gui_smoke_test() -> int:
@@ -1536,8 +2414,9 @@ def run_gui_smoke_test() -> int:
     try:
         app.update_idletasks()
         app.update()
-        if not hasattr(app, "_proxy_tab") or not hasattr(app, "_diag_tab"):
-            raise RuntimeError("GUI tabs failed to initialise")
+        for attr in ("_overview_tab", "_proxy_tab", "_session_tab", "_net_tab", "_agy_tab", "_diag_tab", "_settings_tab"):
+            if not hasattr(app, attr):
+                raise RuntimeError(f"GUI tab {attr} failed to initialise")
         return 0
     finally:
         app._closing = True
