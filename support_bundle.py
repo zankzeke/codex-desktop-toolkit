@@ -62,16 +62,30 @@ def redact_text_content(content: str) -> str:
     # 1. Redact home paths
     text = redact_user_paths(content)
 
-    # 2. Redact API keys / OpenAI keys: sk-...
+    # 2. Redact common API/token formats, including JWT-like values.
     text = re.sub(r"\bsk-[a-zA-Z0-9_-]{10,}\b", "sk-***REDACTED***", text)
+    text = re.sub(r"\b(?:ghp_|github_pat_)[a-zA-Z0-9_-]{10,}\b", "***REDACTED***", text)
+    text = re.sub(
+        r"\b[a-zA-Z0-9_-]{12,}\.[a-zA-Z0-9_-]{12,}\.[a-zA-Z0-9_-]{12,}\b",
+        "***REDACTED-JWT***",
+        text,
+    )
 
-    # 3. Redact Bearer / Authorization tokens
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;\"]+", r"\1***REDACTED***", text)
-    text = re.sub(r"(?i)(bearer\s+)[a-zA-Z0-9\._\-]{20,}", r"\1***REDACTED***", text)
+    # 3. Redact authentication headers regardless of auth scheme.
+    text = re.sub(
+        r"(?im)^((?:proxy-)?authorization\s*[:=]\s*)[^\r\n]+",
+        r"\1***REDACTED***",
+        text,
+    )
+    text = re.sub(r"(?i)(bearer\s+)[^\s,;\"]+", r"\1***REDACTED***", text)
 
-    # 4. Redact Cookies / Session tokens
-    text = re.sub(r"(?i)(session_token\s*=\s*)[^\s,;\"]+", r"\1***REDACTED***", text)
-    text = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\r\n]+", r"\1***REDACTED***", text)
+    # 4. Redact cookie/token header and key-value forms.
+    text = re.sub(r"(?im)^((?:set-)?cookie\s*[:=]\s*)[^\r\n]+", r"\1***REDACTED***", text)
+    text = re.sub(
+        r"(?i)((?:session[_-]?token|access[_-]?token|refresh[_-]?token|x-access-token|x-refresh-token)\s*[:=]\s*)[^\s,;\"]+",
+        r"\1***REDACTED***",
+        text,
+    )
 
     # 5. Redact URLs with embedded user:pass or queries
     def url_cleaner(match: re.Match) -> str:
@@ -93,7 +107,10 @@ def generate_redacted_config() -> str:
         lines = []
         for line in raw.splitlines():
             s = line.strip()
-            if any(k in s.lower() for k in ("api_key", "secret", "token", "password")):
+            if any(k in s.lower() for k in (
+                "api_key", "apikey", "secret", "token", "password", "passwd",
+                "credential", "cookie", "authorization", "private_key", "access_key",
+            )):
                 key_part = line.split("=", 1)[0]
                 lines.append(f'{key_part}= "***REDACTED***"')
             else:

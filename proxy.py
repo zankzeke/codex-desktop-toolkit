@@ -304,7 +304,12 @@ class CodexProxy:
         return web.json_response(self.stats.snapshot())
 
     async def handle_control_transport(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "JSON body must be an object"}, status=400)
         mode = str(data.get("mode", "")).lower().strip()
         if mode not in {"auto", "websocket", "http"}:
             return web.json_response({"ok": False, "error": "invalid transport mode"}, status=400)
@@ -313,7 +318,12 @@ class CodexProxy:
         return web.json_response({"ok": True, "transport_mode": mode})
 
     async def handle_control_circuit_config(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "JSON body must be an object"}, status=400)
         try:
             threshold = max(1, int(data.get("threshold", self.circuit_breaker.threshold)))
             cooldown = max(1, int(data.get("cooldown_seconds", self.circuit_breaker.cooldown_seconds)))
@@ -322,10 +332,13 @@ class CodexProxy:
         action = str(data.get("action_mode", self.circuit_breaker.action_mode))
         if action not in {"auto_switch", "notify_only"}:
             return web.json_response({"ok": False, "error": "invalid action_mode"}, status=400)
+        enabled = data.get("enabled", self.circuit_breaker.enabled)
+        if not isinstance(enabled, bool):
+            return web.json_response({"ok": False, "error": "enabled must be boolean"}, status=400)
         self.circuit_breaker.configure(
             threshold=threshold,
             cooldown_seconds=cooldown,
-            enabled=bool(data.get("enabled", self.circuit_breaker.enabled)),
+            enabled=enabled,
             action_mode=action,
         )
         return web.json_response({"ok": True, "circuit_breaker": self.circuit_breaker.snapshot(self.transport_mode)})

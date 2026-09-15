@@ -151,7 +151,7 @@ class TransportCircuitBreaker:
             if current == CircuitState.OPEN:
                 rem_sec = self.cooldown_remaining_seconds()
                 rem_min = max(1, (rem_sec + 59) // 60)
-                action_desc = "已临时切换 HTTP" if self.action_mode == "auto_switch" else "建议使用 HTTP"
+                action_desc = "已触发自动降级策略" if self.action_mode == "auto_switch" else "仅提示，不改变传输"
                 return f"WebSocket 已临时熔断 | {action_desc} | {rem_min} 分钟后重新探测"
             if current == CircuitState.HALF_OPEN:
                 return "WebSocket 处于半开试探状态 (HALF_OPEN)"

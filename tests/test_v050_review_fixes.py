@@ -14,6 +14,7 @@ from network_diagnostics import check_websocket_connectivity_async, evaluate_dia
 from proxy import make_app
 from proxy_discovery import test_proxy_ws_async as probe_proxy_ws_async
 from startup_manager import NotificationManager
+from support_bundle import redact_text_content
 from transport_policy import CircuitState, TransportCircuitBreaker
 
 
@@ -178,3 +179,30 @@ def test_gui_review_wiring_has_no_stale_v050_symbols():
         assert stale not in source
     assert '"--transport-mode", get_transport_mode()' in source
     assert '"--circuit-threshold"' in source
+
+
+
+def test_support_bundle_redacts_basic_proxy_auth_cookies_and_jwt():
+    jwt = "abcdefghijklmnop.qrstuvwxyzABCDE.fghijklmnopQRST"
+    raw = (
+        "Authorization: Basic dXNlcjpwYXNz\n"
+        "Proxy-Authorization: Negotiate abcdef\n"
+        "Set-Cookie: session=supersecret; Path=/\n"
+        f"token={jwt}\n"
+    )
+    cleaned = redact_text_content(raw)
+    assert "dXNlcjpwYXNz" not in cleaned
+    assert "Negotiate abcdef" not in cleaned
+    assert "supersecret" not in cleaned
+    assert jwt not in cleaned
+
+
+def test_gui_exposes_circuit_action_and_real_temporary_http_override_wiring():
+    import codex_toolkit_gui
+
+    source = inspect.getsource(codex_toolkit_gui)
+    assert "自动临时 HTTP" in source
+    assert "仅提示" in source
+    assert "update_managed_ws_support(False)" in source
+    assert "state == \"HALF_OPEN\"" in source
+    assert "update_managed_ws_support(True)" in source

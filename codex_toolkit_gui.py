@@ -48,7 +48,7 @@ from config_manager import (
     enable_proxy_config, disable_proxy_config, get_proxy_config_status,
     load_upstreams, save_upstreams,
     load_proxies, save_proxies, ENV_PROXY_SENTINEL,
-    get_transport_mode, set_transport_mode,
+    get_transport_mode, set_transport_mode, update_managed_ws_support,
     get_circuit_breaker_config, save_circuit_breaker_config,
 )
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
@@ -861,6 +861,8 @@ class ProxyTab(ttk.Frame):
         self._launch_pending = False
         self._status_poll_busy = False
         self._last_stats = {}
+        self._circuit_http_override = False
+        self._circuit_probe_pending = False
         self._build()
 
     def _build(self):
@@ -936,6 +938,16 @@ class ProxyTab(ttk.Frame):
             row_toml, text="自动熔断", variable=self._cb_enabled_var,
             command=self._on_circuit_config_changed
         ).pack(side=tk.LEFT, padx=(0, 4))
+
+        action_label = "自动临时 HTTP" if cb_cfg.get("action_mode") == "auto_switch" else "仅提示"
+        self._cb_action_var = tk.StringVar(value=action_label)
+        self._cb_action_cb = ttk.Combobox(
+            row_toml, textvariable=self._cb_action_var,
+            values=["自动临时 HTTP", "仅提示"],
+            state="readonly", width=12,
+        )
+        self._cb_action_cb.pack(side=tk.LEFT, padx=(0, 6))
+        self._cb_action_cb.bind("<<ComboboxSelected>>", self._on_circuit_config_changed)
 
         self._cooldown_var = tk.StringVar(value=f"{cb_cfg.get('cooldown_minutes', 15)} 分钟")
         self._cooldown_cb = ttk.Combobox(
@@ -1346,13 +1358,21 @@ class ProxyTab(ttk.Frame):
                 cb_snap=cb_snap,
             )
 
+        # Circuit breaker can optionally perform a real provider-level
+        # temporary HTTP downgrade, while notify-only mode leaves transport alone.
+        self._handle_circuit_transport_policy(cb_snap, cfg)
+
         # Automation checks
         auto_cfg = load_automation_settings()
         if auto_cfg.windows_notifications:
             if healthy and stats.get("traffic_verified"):
                 GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", "Codex 已通过本地代理建立连接", key="traffic_ok")
             if cb_snap.get("state") == "OPEN":
-                GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", "WebSocket 连续失败，已临时切换 HTTP", key="circuit_open")
+                if cb_snap.get("action_mode") == "auto_switch":
+                    notice = "WebSocket 连续失败，已启动临时 HTTP 降级策略"
+                else:
+                    notice = "WebSocket 连续失败；当前为仅提示模式，可运行网络体检或切换强制 HTTP"
+                GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", notice, key="circuit_open")
 
         if auto_cfg.auto_stop_proxy_on_exit and healthy:
             codex_running = is_codex_running()
@@ -1367,6 +1387,79 @@ class ProxyTab(ttk.Frame):
                 self._append_log("[自动化] 检测到 Codex 已退出，已恢复 provider 并停止代理", "info")
                 self._stop_proxy()
             self._had_codex_running = codex_running
+
+    def _handle_circuit_transport_policy(self, cb_snap: dict, cfg_status: dict) -> None:
+        """Apply/revert temporary config-level HTTP downgrade for auto mode."""
+        mode = get_transport_mode()
+        state = str(cb_snap.get("state") or "CLOSED")
+        action = str(cb_snap.get("action_mode") or "notify_only")
+        enabled = bool(cb_snap.get("enabled", False))
+
+        if mode != "auto" or not enabled or action != "auto_switch":
+            if self._circuit_http_override:
+                desired_ws = mode != "http"
+                ok, msg = update_managed_ws_support(desired_ws)
+                if ok:
+                    was_probe = self._circuit_probe_pending
+                    self._circuit_http_override = False
+                    self._circuit_probe_pending = False
+                    self._append_log("[熔断] 自动临时 HTTP 已取消，恢复用户传输策略。", "info")
+                    if not was_probe and cfg_status.get("active") and is_codex_running():
+                        restart_codex()
+                else:
+                    self._append_log(f"[熔断] 恢复 provider 失败: {msg}", "error")
+            return
+
+        # Only mutate the provider we manage, and only when it is actually active.
+        if not cfg_status.get("active"):
+            return
+
+        if state == "OPEN":
+            if (not self._circuit_http_override) or self._circuit_probe_pending:
+                needs_restart = bool(cfg_status.get("supports_websockets", True)) or self._circuit_probe_pending
+                ok, msg = update_managed_ws_support(False)
+                if not ok:
+                    self._append_log(f"[熔断] 临时 HTTP 降级失败: {msg}", "error")
+                    return
+                self._circuit_http_override = True
+                self._circuit_probe_pending = False
+                self._append_log("[熔断] 连续 WS 失败，已临时关闭 provider WebSocket 支持。", "warn")
+                if needs_restart and is_codex_running():
+                    ok_restart, restart_msg = restart_codex()
+                    self._append_log(
+                        f"[熔断] {'已重启 Codex 进入 HTTP 模式' if ok_restart else 'Codex 自动重启失败'}: {restart_msg}",
+                        "warn" if ok_restart else "error",
+                    )
+            return
+
+        if state == "HALF_OPEN" and self._circuit_http_override and not self._circuit_probe_pending:
+            ok, msg = update_managed_ws_support(True)
+            if not ok:
+                self._append_log(f"[熔断] 半开探测启用 WS 失败: {msg}", "error")
+                return
+            self._circuit_probe_pending = True
+            self._append_log("[熔断] 冷却结束，已临时恢复 WS 并准备一次半开探测。", "info")
+            if is_codex_running():
+                ok_restart, restart_msg = restart_codex()
+                self._append_log(
+                    f"[熔断] {'已重启 Codex 进行 WS 半开探测' if ok_restart else 'Codex 自动重启失败'}: {restart_msg}",
+                    "info" if ok_restart else "error",
+                )
+            return
+
+        if state == "CLOSED" and self._circuit_http_override:
+            was_probe = self._circuit_probe_pending
+            ok, msg = update_managed_ws_support(True)
+            if not ok:
+                self._append_log(f"[熔断] 恢复 WS provider 配置失败: {msg}", "error")
+                return
+            self._circuit_http_override = False
+            self._circuit_probe_pending = False
+            self._append_log("[熔断] WebSocket 已恢复稳定，自动 HTTP 降级结束。", "ok")
+            # A successful half-open probe already ran with WS enabled; a manual
+            # reset did not, so reload Codex only in the latter case.
+            if not was_probe and is_codex_running():
+                restart_codex()
 
     def _post_control(self, path: str, payload: dict | None = None) -> bool:
         try:
@@ -1389,6 +1482,9 @@ class ProxyTab(ttk.Frame):
         self._transport_mode_var.set(labels[mode])
         self._ws_var.set(mode != "http")
         ok, msg = set_transport_mode(mode)
+        if ok:
+            self._circuit_http_override = False
+            self._circuit_probe_pending = False
         self._append_log(f"[传输模式] {msg}", "info" if ok else "warn")
         if ok:
             self._post_control("/control/transport", {"mode": mode})
@@ -1437,26 +1533,40 @@ class ProxyTab(ttk.Frame):
             cd_min = int(cd_str)
         except ValueError:
             cd_min = 15
+        current_cfg = get_circuit_breaker_config()
         cfg = {
             "enabled": self._cb_enabled_var.get(),
-            "action_mode": "auto_switch",
+            "action_mode": "auto_switch" if self._cb_action_var.get() == "自动临时 HTTP" else "notify_only",
             "cooldown_minutes": cd_min,
-            "failure_threshold": 3,
+            "failure_threshold": current_cfg.get("failure_threshold", 3),
         }
         save_circuit_breaker_config(cfg)
         GLOBAL_CIRCUIT_BREAKER.configure(
             enabled=cfg["enabled"],
             cooldown_minutes=cd_min,
-            threshold=3,
+            threshold=cfg["failure_threshold"],
             action_mode=cfg["action_mode"],
         )
         self._post_control("/control/circuit/config", {
             "enabled": cfg["enabled"],
             "action_mode": cfg["action_mode"],
-            "threshold": 3,
+            "threshold": cfg["failure_threshold"],
             "cooldown_seconds": cd_min * 60,
         })
-        self._append_log(f"[熔断配置] 已更新: 启用={cfg['enabled']}, 冷却={cd_min}分钟", "info")
+        self._append_log(
+            f"[熔断配置] 已更新: 启用={cfg['enabled']}, 策略={self._cb_action_var.get()}, 冷却={cd_min}分钟",
+            "info",
+        )
+        if not cfg["enabled"] and self._circuit_http_override:
+            desired_ws = get_transport_mode() != "http"
+            ok_restore, restore_msg = update_managed_ws_support(desired_ws)
+            if ok_restore:
+                self._circuit_http_override = False
+                self._circuit_probe_pending = False
+                if is_codex_running():
+                    restart_codex()
+            else:
+                self._append_log(f"[熔断] 关闭熔断器时恢复 provider 失败: {restore_msg}", "error")
 
 
     def _activate_and_launch_codex(self, port_num: int):
@@ -2405,7 +2515,7 @@ class SettingsTab(ttk.Frame):
         self._cb_thresh_var = tk.StringVar(value=str(cb_cfg.get("failure_threshold", 3)))
         thresh_ent = ttk.Entry(grid, textvariable=self._cb_thresh_var, width=8)
         thresh_ent.grid(row=0, column=1, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(grid, text="次 (达到后自动跳过 WS 握手，直接降级 HTTP)").grid(row=0, column=2, sticky=tk.W, padx=4, pady=4)
+        ttk.Label(grid, text="次 (达到后按代理控制页策略：仅提示或临时 HTTP；临时 HTTP 需要重载 Codex)").grid(row=0, column=2, sticky=tk.W, padx=4, pady=4)
 
         ttk.Label(grid, text="熔断冷却重试周期:").grid(row=1, column=0, sticky=tk.W, padx=4, pady=4)
         self._cb_cooldown_var = tk.StringVar(value=str(cb_cfg.get("cooldown_seconds", 900)))

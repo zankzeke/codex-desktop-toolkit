@@ -270,9 +270,10 @@ def set_transport_mode(mode: str, port: int | None = None) -> Tuple[bool, str]:
     return True, f"传输模式已更新为 {mode} (supports_websockets={ws_enabled})。"
 
 def update_managed_ws_support(ws_enabled: bool) -> Tuple[bool, str]:
-    """Update supports_websockets in config.toml without altering provider or base_url."""
+    """Update supports_websockets atomically without changing provider/base_url."""
     if not CONFIG_PATH.exists():
         return False, "Config file not found."
+    temp_path = CONFIG_PATH.with_suffix(f".tmp.{time.time()}")
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             doc = tomlkit.load(f)
@@ -280,15 +281,17 @@ def update_managed_ws_support(ws_enabled: bool) -> Tuple[bool, str]:
         if "openai-idfix" not in providers:
             return False, "openai-idfix provider not found in config.toml"
 
+        desired = bool(ws_enabled)
         block = providers["openai-idfix"]
-        if block.get("supports_websockets") != bool(ws_enabled):
-            backup_file(CONFIG_PATH)
-        block["supports_websockets"] = bool(ws_enabled)
+        current = bool(block.get("supports_websockets", True))
+        if current == desired:
+            state = _load_state()
+            state["managed_proxy_ws"] = desired
+            _save_state(state)
+            return True, f"supports_websockets already {desired}"
 
-        state = _load_state()
-        state["managed_proxy_ws"] = bool(ws_enabled)
-
-        temp_path = CONFIG_PATH.with_suffix(f".tmp.{time.time()}")
+        backup_file(CONFIG_PATH)
+        block["supports_websockets"] = desired
         with open(temp_path, "w", encoding="utf-8") as f:
             tomlkit.dump(doc, f)
             f.flush()
@@ -296,10 +299,19 @@ def update_managed_ws_support(ws_enabled: bool) -> Tuple[bool, str]:
         with open(temp_path, "r", encoding="utf-8") as f:
             tomlkit.load(f)
         os.replace(temp_path, CONFIG_PATH)
+
+        state = _load_state()
+        state["managed_proxy_ws"] = desired
         _save_state(state)
-        return True, f"Updated supports_websockets to {ws_enabled}"
+        return True, f"Updated supports_websockets to {desired}"
     except Exception as exc:
         return False, f"Failed to update supports_websockets: {exc}"
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def enable_proxy_config(port: int, ws_enabled: bool) -> Tuple[bool, str]:
