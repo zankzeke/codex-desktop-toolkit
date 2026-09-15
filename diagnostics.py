@@ -5,7 +5,6 @@ import json
 import os
 import socket
 import subprocess
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -62,8 +61,6 @@ def get_codex_process_info() -> dict[str, Any]:
             timeout=4,
         )
         lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-        # PowerShell itself (or a mocked subprocess in tests) can emit diagnostic
-        # text on stdout. Only a real codex.exe-looking path is authoritative.
         if lines and lines[0].lower().replace("/", "\\").endswith("\\codex.exe"):
             result["running"] = True
             result["path"] = lines[0]
@@ -73,7 +70,6 @@ def get_codex_process_info() -> dict[str, Any]:
     except Exception:
         pass
 
-    # Fallback to tasklist. Windows output casing is not stable.
     try:
         res = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq Codex.exe", "/NH"],
@@ -105,7 +101,7 @@ def get_diagnostics(port: int) -> dict[str, Any]:
             "http_proxy": mask_url(os.environ.get("HTTP_PROXY")),
             "https_proxy": mask_url(os.environ.get("HTTPS_PROXY")),
             "all_proxy": mask_url(os.environ.get("ALL_PROXY")),
-            "no_proxy": os.environ.get("NO_PROXY"),
+            "no_proxy": "set (contents redacted)" if os.environ.get("NO_PROXY") else None,
         },
     }
 
@@ -132,7 +128,6 @@ def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
 
     codex_path = str(codex.get("path") or "unknown")
     try:
-        from pathlib import Path
         home = str(Path.home())
         if home and codex_path.lower().startswith(home.lower()):
             codex_path = "~" + codex_path[len(home):]
@@ -149,6 +144,8 @@ def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
         f"- Config exists: {bool(codex.get('config_exists'))}",
         f"- model_provider: {cfg.get('provider') or 'unknown'}",
         f"- Local provider active for port: {bool(cfg.get('active_for_port'))}",
+        f"- Managed transport mode: {cfg.get('transport_mode') or 'unknown'}",
+        f"- supports_websockets: {cfg.get('supports_websockets') if cfg.get('supports_websockets') is not None else 'unknown'}",
         f"- Proxy running: {bool(proxy.get('running'))}",
         f"- Proxy port: {proxy.get('port')}",
         f"- Port owner: {proxy.get('owner_name') or 'unknown'} (PID {proxy.get('owner_pid') or 'unknown'})",
@@ -166,15 +163,18 @@ def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
         f"- WS handshakes: {ws.get('handshakes', 0)}",
         f"- WS reconnects: {ws.get('reconnects', 0)}",
         f"- WS failures: {ws.get('failures', 0)}",
+        f"- WS consecutive failures: {ws.get('consecutive_failures', 0)}",
+        f"- WS breaker tripped: {bool(ws.get('breaker_tripped'))}",
         f"- WS last close code: {ws.get('last_close_code') if ws.get('last_close_code') is not None else 'none'}",
         f"- Last error category: {err.get('category') or 'none'}",
         f"- Last error title: {err.get('title') or 'none'}",
+        f"- Suggested action: {err.get('next_action') or 'none'}",
         "",
         "## Environment proxy variables (masked)",
         f"- HTTP_PROXY: {net.get('http_proxy') or 'unset'}",
         f"- HTTPS_PROXY: {net.get('https_proxy') or 'unset'}",
         f"- ALL_PROXY: {net.get('all_proxy') or 'unset'}",
-        f"- NO_PROXY: {'set (contents redacted)' if net.get('no_proxy') else 'unset'}",
+        f"- NO_PROXY: {net.get('no_proxy') or 'unset'}",
         "",
         "> Authentication headers, cookies, request bodies, response bodies and URL query strings are intentionally omitted.",
     ]
