@@ -1,6 +1,6 @@
 """Privacy-safe error classification for Codex Bridge Toolkit.
 
-The classifier deliberately returns only a small category/title/action tuple.  It
+The classifier deliberately returns only a small category/title/action tuple. It
 never persists request/response bodies or authentication data.
 """
 from __future__ import annotations
@@ -17,17 +17,39 @@ ERROR_INFO = {
     "ws_policy": ("WebSocket 策略", "上游以 1008 Policy 关闭连接，检查账号/策略/网络中间层。"),
     "ws_abnormal": ("WebSocket 异常", "连接异常中断（1006），检查代理、VPN、TUN 或网络稳定性。"),
     "ws_internal": ("WebSocket 内部错误", "连接以 1011 结束，检查 Toolkit 日志和上游状态。"),
-    "ws_timeout": ("WebSocket 超时", "WebSocket 握手或连接超时，可检查代理/TUN 后观察 HTTPS fallback。"),
+    "ws_timeout": ("WebSocket 超时", "WebSocket 握手或连接超时，可检查代理/TUN 或切换强制 HTTP。"),
     "network": ("网络/上游连接", "本地代理无法稳定连接上游，检查上游代理、DNS、VPN/TUN。"),
     "upstream_5xx": ("上游服务异常", "上游返回 5xx；通常无需修改本地会话，稍后重试。"),
     "client_4xx": ("请求被拒绝", "上游返回 4xx；检查配置、请求兼容性和账号状态。"),
     "unknown": ("未知错误", "查看脱敏诊断报告和最近日志定位。"),
 }
 
+NEXT_ACTION = {
+    "ok": "none",
+    "capacity": "none",
+    "auth": "restore_direct",
+    "rate_limit": "none",
+    "invalid_id": "scan_sessions",
+    "ws_policy": "network_check",
+    "ws_abnormal": "force_http",
+    "ws_internal": "network_check",
+    "ws_timeout": "force_http",
+    "network": "network_check",
+    "upstream_5xx": "none",
+    "client_4xx": "diagnostics",
+    "unknown": "diagnostics",
+}
+
 
 def _result(category: str, status: int | None = None) -> dict[str, Any]:
     title, action = ERROR_INFO.get(category, ERROR_INFO["unknown"])
-    return {"category": category, "title": title, "action": action, "status": status}
+    return {
+        "category": category,
+        "title": title,
+        "action": action,
+        "next_action": NEXT_ACTION.get(category, "diagnostics"),
+        "status": status,
+    }
 
 
 def classify_error(
