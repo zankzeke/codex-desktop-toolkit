@@ -172,8 +172,9 @@ async def test_proxy_ws_async(
     except aiohttp.WSServerHandshakeError as exc:
         elapsed = round((time.monotonic() - t0) * 1000, 1)
         if exc.status in (401, 403):
-            # The handshake reached upstream and rejected unauthenticated probe -> WS forwarding works!
-            return True, elapsed, f"WebSocket 握手成功 (HTTP {exc.status} 鉴权正常)"
+            # Reaching an HTTP auth rejection proves routing/reachability, but
+            # not that a WebSocket 101 upgrade actually succeeded.
+            return False, elapsed, f"上游可达，但匿名探测无法确认 WS 升级 (HTTP {exc.status})"
         return False, elapsed, f"握手被拒绝 (HTTP {exc.status})"
     except asyncio.TimeoutError:
         elapsed = round((time.monotonic() - t0) * 1000, 1)

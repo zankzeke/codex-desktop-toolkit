@@ -12,7 +12,7 @@ def test_mask_url_sensitive():
 def test_evaluate_diagnostics_http_ok_ws_fail():
     local_res = {"listening": True, "health_ok": True}
     https_res = {"ok": True, "total_ms": 180, "error": None}
-    ws_res = {"ok": False, "handshake_ms": 2500, "error": "WebSocket 握手超时 (Timeout)", "error_type": "ws_timeout"}
+    ws_res = {"ok": False, "reachable": False, "conclusive": True, "handshake_ms": 2500, "error": "WebSocket 握手超时 (Timeout)", "error_type": "ws_timeout"}
     sys_proxy = {"windows_settings": {"proxy_enabled": True}}
 
     diag = evaluate_diagnostics(local_res, https_res, ws_res, sys_proxy)
@@ -34,7 +34,7 @@ def test_evaluate_diagnostics_both_503():
 def test_evaluate_diagnostics_both_ok():
     local_res = {"listening": True, "health_ok": True}
     https_res = {"ok": True, "total_ms": 120, "error": None}
-    ws_res = {"ok": True, "handshake_ms": 150, "error": None}
+    ws_res = {"ok": True, "reachable": True, "conclusive": True, "handshake_ms": 150, "error": None}
     sys_proxy = {}
 
     diag = evaluate_diagnostics(local_res, https_res, ws_res, sys_proxy)

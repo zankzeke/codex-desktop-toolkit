@@ -219,6 +219,16 @@ class App(tk.Tk):
         self.after(0, self._theme_manager.refresh_widgets)
         self.after(1800, self._check_updates_background)
 
+        # Load persisted circuit settings for GUI fallback displays. The
+        # running proxy receives the same settings through its CLI/control API.
+        cb_cfg = get_circuit_breaker_config()
+        GLOBAL_CIRCUIT_BREAKER.configure(
+            threshold=cb_cfg.get("failure_threshold", 3),
+            cooldown_seconds=cb_cfg.get("cooldown_seconds", 900),
+            enabled=cb_cfg.get("enabled", True),
+            action_mode=cb_cfg.get("action_mode", "auto_switch"),
+        )
+
         # Automation check: auto-start proxy if enabled
         auto_settings = load_automation_settings()
         if auto_settings.auto_start_proxy:
@@ -462,7 +472,7 @@ class OverviewTab(ttk.Frame):
 
     def _go_net_diag(self):
         self._app.select_tab(self._app._net_tab)
-        self._app._net_tab.start_diagnostics()
+        self._app._net_tab._run_diagnostics()
 
     def _go_scan_sessions(self):
         self._app.select_tab(self._app._session_tab)
@@ -1347,8 +1357,70 @@ class ProxyTab(ttk.Frame):
         if auto_cfg.auto_stop_proxy_on_exit and healthy:
             codex_running = is_codex_running()
             if getattr(self, "_had_codex_running", False) and not codex_running:
+                cfg_now = get_proxy_config_status()
+                if cfg_now.get("active"):
+                    ok, msg = disable_proxy_config()
+                    if not ok:
+                        self._append_log(f"[自动化] Codex 已退出，但安全恢复 provider 失败，代理保持运行: {msg}", "error")
+                        self._had_codex_running = codex_running
+                        return
+                self._append_log("[自动化] 检测到 Codex 已退出，已恢复 provider 并停止代理", "info")
                 self._stop_proxy()
             self._had_codex_running = codex_running
+
+    def _post_control(self, path: str, payload: dict | None = None) -> bool:
+        try:
+            port = int(self._port_var.get().strip() or "8787")
+            data = json.dumps(payload or {}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def _set_transport_mode(self, mode: str, *, prompt_restart: bool = True):
+        labels = {"auto": "自动 (默认)", "websocket": "WebSocket (保持)", "http": "强制 HTTP"}
+        mode = mode if mode in labels else "auto"
+        self._transport_mode_var.set(labels[mode])
+        self._ws_var.set(mode != "http")
+        ok, msg = set_transport_mode(mode)
+        self._append_log(f"[传输模式] {msg}", "info" if ok else "warn")
+        if ok:
+            self._post_control("/control/transport", {"mode": mode})
+        if ok and prompt_restart and is_codex_running():
+            if messagebox.askyesno(
+                "传输模式已更新",
+                f"传输模式已切换为「{labels[mode]}」。\n\n"
+                "Codex Desktop 正在运行；supports_websockets 在启动时读取。\n\n是否立即重启 Codex？",
+            ):
+                restart_codex()
+        return ok
+
+    def _selected_outbound_proxy_url(self) -> str | None:
+        selected = self._proxy_var.get().strip()
+        if selected == ENV_PROXY_SENTINEL:
+            return (
+                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+                or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+            )
+        return selected or None
+
+    def _selected_upstream_url(self) -> str:
+        label = self._upstream_var.get().strip()
+        return self._upstreams_dict.get(label, "https://chatgpt.com/backend-api/codex")
+
+    def _apply_discovered_proxy(self, proxy_url: str, label: str) -> None:
+        self._proxies_dict[proxy_url] = label or "自动发现"
+        self._proxy_cb["values"] = list(self._proxies_dict.keys()) + ["<编辑/新增代理...>"]
+        self._proxy_var.set(proxy_url)
+        self._proxy_lbl.config(text=self._proxies_dict[proxy_url])
+        save_proxies(self._proxies_dict, proxy_url)
 
     def _on_transport_mode_changed(self, event=None):
         val = self._transport_mode_var.get()
@@ -1357,17 +1429,7 @@ class ProxyTab(ttk.Frame):
             mode = "websocket"
         elif "HTTP" in val:
             mode = "http"
-
-        self._ws_var.set(mode != "http")
-        ok, msg = set_transport_mode(mode)
-        self._append_log(f"[传输模式] {msg}", "info" if ok else "warn")
-
-        if is_codex_running():
-            if messagebox.askyesno(
-                "传输模式已更新",
-                f"传输模式已切换为「{val}」。\n\nCodex Desktop 正在运行，必须重启 Codex 才能生效。\n\n是否立即重启 Codex？"
-            ):
-                restart_codex()
+        self._set_transport_mode(mode, prompt_restart=True)
 
     def _on_circuit_config_changed(self, event=None):
         cd_str = self._cooldown_var.get().replace(" 分钟", "").strip()
@@ -1386,7 +1448,14 @@ class ProxyTab(ttk.Frame):
             enabled=cfg["enabled"],
             cooldown_minutes=cd_min,
             threshold=3,
+            action_mode=cfg["action_mode"],
         )
+        self._post_control("/control/circuit/config", {
+            "enabled": cfg["enabled"],
+            "action_mode": cfg["action_mode"],
+            "threshold": 3,
+            "cooldown_seconds": cd_min * 60,
+        })
         self._append_log(f"[熔断配置] 已更新: 启用={cfg['enabled']}, 冷却={cd_min}分钟", "info")
 
 
@@ -1429,6 +1498,14 @@ class ProxyTab(ttk.Frame):
             self._activate_and_launch_codex(port_num)
             return
         status = get_proxy_config_status(port_num)
+        auto_cfg = load_automation_settings()
+        if auto_cfg.auto_apply_provider and not status.get("active_for_port"):
+            ok, msg = enable_proxy_config(port_num, self._ws_var.get())
+            self._append_log(
+                f"[自动化] {'已自动应用 provider' if ok else '自动应用 provider 失败'}: {msg}",
+                "ok" if ok else "error",
+            )
+            status = get_proxy_config_status(port_num)
 
         if not is_codex_running():
             if not status.get("active_for_port"):
@@ -1586,12 +1663,18 @@ class ProxyTab(ttk.Frame):
             cmd = [str(PROXY_EXE)]
         else:
             cmd = [PYTHON_EXE, "-X", "utf8", str(PROXY_SCRIPT)]
+        cb_cfg = get_circuit_breaker_config()
         cmd += [
             "--port", port,
             "--upstream", upstream,
             "--reasoning-mode", "safe",
             "--log-level", "DEBUG",
             "--proxy-mode", proxy_mode,
+            "--transport-mode", get_transport_mode(),
+            "--circuit-enabled", "true" if cb_cfg.get("enabled", True) else "false",
+            "--circuit-action", cb_cfg.get("action_mode", "auto_switch"),
+            "--circuit-threshold", str(cb_cfg.get("failure_threshold", 3)),
+            "--circuit-cooldown-seconds", str(cb_cfg.get("cooldown_seconds", 900)),
         ]
         if proxy_mode == "explicit" and upstream_proxy_url:
             cmd += ["--upstream-proxy", upstream_proxy_url]
@@ -1939,21 +2022,20 @@ class DiagnosticsTab(ttk.Frame):
     def _dispatch_action(self, action_id: str):
         if action_id == "scan_sessions":
             self._app.select_tab(self._app._session_tab)
-            self._app._session_tab._scan_sessions()
+            self._app._session_tab._scan()
         elif action_id == "open_net_diagnostics":
             self._app.select_tab(self._app._net_tab)
             self._app._net_tab._run_diagnostics()
         elif action_id == "switch_force_http":
             self._app.select_tab(self._app._proxy_tab)
-            self._app._proxy_tab._transport_var.set("http")
-            self._app._proxy_tab._on_transport_mode_change()
+            self._app._proxy_tab._set_transport_mode("http")
             messagebox.showinfo("模式已切换", "传输模式已自动切换为「强制 HTTP」。")
         elif action_id == "open_proxy_discovery":
             self._app.select_tab(self._app._net_tab)
             self._app._net_tab._discover_proxies()
         elif action_id == "restore_config":
             self._app.select_tab(self._app._proxy_tab)
-            self._app._proxy_tab._disable_proxy()
+            self._app._proxy_tab._disable_proxy_config()
         else:
             messagebox.showinfo("提示", "当前异常暂无自动修复操作，请参考诊断详情手动处理。")
 
@@ -2099,16 +2181,12 @@ class NetworkDiagnosticsTab(ttk.Frame):
         except ValueError:
             port = 8787
 
-        proxy_mode = self._app._proxy_tab._proxy_mode_var.get()
-        proxy_url = None
-        if proxy_mode == "custom":
-            proxy_url = self._app._proxy_tab._custom_entry.get().strip() or None
-        elif proxy_mode == "env":
-            proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+        proxy_url = self._app._proxy_tab._selected_outbound_proxy_url()
+        upstream_url = self._app._proxy_tab._selected_upstream_url()
 
         def worker():
             try:
-                res = run_full_diagnostics(port=port, proxy_url=proxy_url)
+                res = run_full_diagnostics(port=port, upstream_url=upstream_url, proxy_url=proxy_url)
                 self.after(0, lambda: self._on_diagnostics_done(res))
             except Exception as exc:
                 self.after(0, lambda: self._on_diagnostics_error(str(exc)))
@@ -2135,7 +2213,9 @@ class NetworkDiagnosticsTab(ttk.Frame):
 
         ws = res.get("websocket", {})
         if ws.get("ok"):
-            self._lbl_ws.config(text=f"握手正常 ({ws.get('handshake_ms')}ms)", foreground="#a6e3a1")
+            self._lbl_ws.config(text=f"101 升级成功 ({ws.get('handshake_ms')}ms)", foreground="#a6e3a1")
+        elif ws.get("reachable") and not ws.get("conclusive", True):
+            self._lbl_ws.config(text=f"上游可达 / 升级未确认 (HTTP {ws.get('status')})", foreground="#f9e2af")
         else:
             err = ws.get("error") or "失败"
             self._lbl_ws.config(text=f"握手异常: {err[:25]}", foreground="#f38ba8")
@@ -2166,8 +2246,7 @@ class NetworkDiagnosticsTab(ttk.Frame):
 
     def _switch_to_force_http(self):
         self._app.select_tab(self._app._proxy_tab)
-        self._app._proxy_tab._transport_var.set("http")
-        self._app._proxy_tab._on_transport_mode_change()
+        self._app._proxy_tab._set_transport_mode("http")
         messagebox.showinfo("已切换", "传输模式已切换为「强制 HTTP」。")
 
     def _discover_proxies(self):
@@ -2250,10 +2329,7 @@ class NetworkDiagnosticsTab(ttk.Frame):
             return
 
         proxy_url = target_proxy.proxy_url
-        self._app._proxy_tab._proxy_mode_var.set("custom")
-        self._app._proxy_tab._custom_entry.delete(0, tk.END)
-        self._app._proxy_tab._custom_entry.insert(0, proxy_url)
-        self._app._proxy_tab._on_proxy_mode_change()
+        self._app._proxy_tab._apply_discovered_proxy(proxy_url, target_proxy.name)
         self._app.select_tab(self._app._proxy_tab)
         messagebox.showinfo(
             "已应用代理",
@@ -2306,7 +2382,7 @@ class SettingsTab(ttk.Frame):
         ).pack(anchor=tk.W, padx=12, pady=4)
         ttk.Checkbutton(
             auto_frame,
-            text="退出 Toolkit 时自动停止代理并恢复原始 config.toml 配置",
+            text="Codex 退出后自动停止代理并安全恢复原 provider",
             variable=self._auto_stop_var,
             command=self._save_automation,
         ).pack(anchor=tk.W, padx=12, pady=4)
@@ -2390,13 +2466,31 @@ class SettingsTab(ttk.Frame):
             messagebox.showerror("参数无效", "阈值与冷却时间必须为大于 0 的整数。")
             return
 
-        save_circuit_breaker_config(thresh, cd)
-        GLOBAL_CIRCUIT_BREAKER.failure_threshold = thresh
-        GLOBAL_CIRCUIT_BREAKER.cooldown_seconds = cd
+        current = get_circuit_breaker_config()
+        save_circuit_breaker_config(
+            failure_threshold=thresh,
+            cooldown_seconds=cd,
+            enabled=current.get("enabled", True),
+            action_mode=current.get("action_mode", "auto_switch"),
+        )
+        GLOBAL_CIRCUIT_BREAKER.configure(
+            threshold=thresh,
+            cooldown_seconds=cd,
+            enabled=current.get("enabled", True),
+            action_mode=current.get("action_mode", "auto_switch"),
+        )
+        self._app._proxy_tab._post_control("/control/circuit/config", {
+            "threshold": thresh,
+            "cooldown_seconds": cd,
+            "enabled": current.get("enabled", True),
+            "action_mode": current.get("action_mode", "auto_switch"),
+        })
+        self._refresh_cb_status()
         messagebox.showinfo("已保存", f"熔断配置已更新：失败阈值 {thresh} 次，冷却时间 {cd} 秒。")
 
     def _reset_cb(self):
         GLOBAL_CIRCUIT_BREAKER.reset()
+        self._app._proxy_tab._post_control("/control/circuit/reset", {})
         self._refresh_cb_status()
         messagebox.showinfo("已重置", "WebSocket 熔断器已重置为 CLOSED 状态。")
 

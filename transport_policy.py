@@ -57,6 +57,7 @@ class TransportCircuitBreaker:
         self._last_failure_at: float | None = None
         self._last_success_at: float | None = None
         self._circuit_opened_at: float | None = None
+        self._half_open_probe_in_flight = False
 
     @property
     def state(self) -> CircuitState:
@@ -68,6 +69,7 @@ class TransportCircuitBreaker:
             elapsed = time.time() - self._circuit_opened_at
             if elapsed >= self.cooldown_seconds:
                 self._state = CircuitState.HALF_OPEN
+                self._half_open_probe_in_flight = False
         return self._state
 
     def record_success(self) -> CircuitState:
@@ -76,6 +78,8 @@ class TransportCircuitBreaker:
             self._consecutive_failures = 0
             self._last_success_at = time.time()
             self._state = CircuitState.CLOSED
+            self._circuit_opened_at = None
+            self._half_open_probe_in_flight = False
             return self._state
 
     def record_failure(self, reason: str = "") -> CircuitState:
@@ -85,13 +89,15 @@ class TransportCircuitBreaker:
             self._last_failure_at = time.time()
             self._last_failure_reason = str(reason or "websocket failure")
 
-            if self.enabled and self._consecutive_failures >= self.threshold:
+            if self._state == CircuitState.HALF_OPEN:
+                # A failed half-open trial immediately reopens the circuit.
                 self._state = CircuitState.OPEN
                 self._circuit_opened_at = time.time()
-            elif self._state == CircuitState.HALF_OPEN:
-                # Probing trial failed in half-open state, reopen circuit
+                self._half_open_probe_in_flight = False
+            elif self.enabled and self._consecutive_failures >= self.threshold:
                 self._state = CircuitState.OPEN
                 self._circuit_opened_at = time.time()
+                self._half_open_probe_in_flight = False
 
             return self._state
 
@@ -111,7 +117,18 @@ class TransportCircuitBreaker:
 
         with self._lock:
             current = self._evaluate_state_locked()
-            return current != CircuitState.OPEN
+            # notify_only tracks degradation but must never change transport.
+            if self.action_mode == "notify_only":
+                return True
+            if current == CircuitState.OPEN:
+                return False
+            if current == CircuitState.HALF_OPEN:
+                # Permit exactly one trial connection. Parallel requests wait
+                # for that trial to resolve rather than stampeding upstream.
+                if self._half_open_probe_in_flight:
+                    return False
+                self._half_open_probe_in_flight = True
+            return True
 
     def cooldown_remaining_seconds(self) -> int:
         with self._lock:
@@ -145,16 +162,24 @@ class TransportCircuitBreaker:
         *,
         threshold: int | None = None,
         cooldown_minutes: int | None = None,
+        cooldown_seconds: int | None = None,
         enabled: bool | None = None,
         action_mode: str | None = None,
     ) -> None:
         with self._lock:
             if threshold is not None:
                 self.threshold = max(1, int(threshold))
-            if cooldown_minutes is not None:
+            if cooldown_seconds is not None:
+                self.cooldown_seconds = max(1, int(cooldown_seconds))
+            elif cooldown_minutes is not None:
                 self.cooldown_seconds = max(10, int(cooldown_minutes) * 60)
             if enabled is not None:
                 self.enabled = bool(enabled)
+                if not self.enabled:
+                    self._state = CircuitState.CLOSED
+                    self._consecutive_failures = 0
+                    self._circuit_opened_at = None
+                    self._half_open_probe_in_flight = False
             if action_mode is not None:
                 self.action_mode = "auto_switch" if action_mode == "auto_switch" else "notify_only"
 
@@ -163,6 +188,7 @@ class TransportCircuitBreaker:
             self._state = CircuitState.CLOSED
             self._consecutive_failures = 0
             self._circuit_opened_at = None
+            self._half_open_probe_in_flight = False
 
     def snapshot(self, transport_mode: str = "auto") -> dict[str, Any]:
         with self._lock:

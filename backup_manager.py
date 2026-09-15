@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Tuple
 
 from history_fixer import backup_file, is_codex_running
+from id_rewriter import MSG_ID_RE, prepare_rewrite_context
 
 
 @dataclass
@@ -70,85 +71,90 @@ def list_session_backups(sessions_dir: Path | None = None) -> list[dict[str, Any
 
 
 def compute_structured_diff(current_path: Path, backup_path: Path) -> StructuredDiff:
-    """Compute a privacy-safe structural diff between backup and current session.
-
-    Never extracts or returns full message content / chat text.
-    """
-    id_changes: list[dict[str, str]] = []
-    reference_changes: list[dict[str, str]] = []
-    reasoning_drops = 0
-
-    cur_lines: list[str] = []
-    bak_lines: list[str] = []
-
-    if current_path.exists():
-        with open(current_path, "r", encoding="utf-8", errors="replace") as f:
-            cur_lines = [line.strip() for line in f if line.strip()]
-
-    if backup_path.exists():
-        with open(backup_path, "r", encoding="utf-8", errors="replace") as f:
-            bak_lines = [line.strip() for line in f if line.strip()]
-
-    # Collect IDs from backup vs current lines
-    def extract_item_ids(lines: list[str]) -> list[str]:
-        ids: list[str] = []
-        for line in lines:
-            try:
-                obj = json.loads(line)
-                # Rollout files might be wrapped in a list or dict
-                items = obj if isinstance(obj, list) else [obj]
-                for item in items:
-                    if isinstance(item, dict):
-                        # Message or item id
-                        iid = item.get("id")
-                        if isinstance(iid, str):
-                            ids.append(iid)
-                        # Payload item
-                        sub = item.get("item")
-                        if isinstance(sub, dict) and isinstance(sub.get("id"), str):
-                            ids.append(sub["id"])
-            except Exception:
-                pass
-        return ids
-
-    bak_ids = extract_item_ids(bak_lines)
-    cur_ids = extract_item_ids(cur_lines)
-
-    # Detect synthetic -> fixed ID mappings
-    seen_pairs: set[tuple[str, str]] = set()
-    for b_id, c_id in zip(bak_ids, cur_ids):
-        if b_id != c_id:
-            pair = (b_id, c_id)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                if b_id.startswith("resp_") and c_id.startswith("msg_"):
-                    id_changes.append({"old_id": b_id, "new_id": c_id})
-                elif b_id.startswith("item_"):
-                    reference_changes.append({"old_ref": b_id, "new_ref": c_id})
-                else:
-                    id_changes.append({"old_id": b_id, "new_id": c_id})
-
-    # Count reasoning item differences
-    def count_reasoning_items(lines: list[str]) -> int:
-        count = 0
-        for line in lines:
-            if "reasoning" in line.lower() or "thought" in line.lower():
+    """Compute a privacy-safe structural diff using deterministic ID mappings."""
+    def load_records(path: Path) -> tuple[list[dict[str, Any]], int]:
+        records: list[dict[str, Any]] = []
+        line_count = 0
+        if not path.exists():
+            return records, line_count
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                line_count += 1
                 try:
-                    obj = json.loads(line)
-                    items = obj if isinstance(obj, list) else [obj]
-                    for item in items:
-                        if isinstance(item, dict):
-                            t = str(item.get("type", "")).lower()
-                            if "reasoning" in t:
-                                count += 1
-                except Exception:
-                    pass
-        return count
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    records.append(obj)
+        return records, line_count
 
-    bak_reasoning = count_reasoning_items(bak_lines)
-    cur_reasoning = count_reasoning_items(cur_lines)
-    if bak_reasoning > cur_reasoning:
-        reasoning_drops = bak_reasoning - cur_reasoning
+    def collect_ids_and_refs(obj: Any) -> tuple[set[str], set[str]]:
+        ids: set[str] = set()
+        refs: set[str] = set()
+        ref_keys = {"item_id", "message_id", "previous_item_id", "parent_id", "response_id"}
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                raw_id = value.get("id")
+                if isinstance(raw_id, str):
+                    ids.add(raw_id)
+                for key in ref_keys:
+                    ref = value.get(key)
+                    if isinstance(ref, str):
+                        refs.add(ref)
+                for key, child in value.items():
+                    if key not in {"content", "text"} and isinstance(child, (dict, list)):
+                        walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(obj)
+        return ids, refs
+
+    current_records, current_lines = load_records(current_path)
+    backup_records, backup_lines = load_records(backup_path)
+
+    id_map: dict[str, str] = {}
+    dropped_ids: set[str] = set()
+    prepare_rewrite_context(
+        backup_records,
+        id_map=id_map,
+        dropped_ids=dropped_ids,
+        safe_reasoning=True,
+    )
+
+    current_ids: set[str] = set()
+    current_refs: set[str] = set()
+    backup_ids: set[str] = set()
+    backup_refs: set[str] = set()
+    for obj in current_records:
+        ids, refs = collect_ids_and_refs(obj)
+        current_ids.update(ids)
+        current_refs.update(refs)
+    for obj in backup_records:
+        ids, refs = collect_ids_and_refs(obj)
+        backup_ids.update(ids)
+        backup_refs.update(refs)
+
+    for old_id in backup_ids:
+        match = MSG_ID_RE.match(old_id)
+        if match:
+            id_map.setdefault(old_id, f"msg_{match.group(1)}")
+
+    id_changes = [
+        {"old_id": old, "new_id": new}
+        for old, new in sorted(id_map.items())
+        if new in current_ids
+    ]
+    reference_changes = [
+        {"old_ref": old, "new_ref": new}
+        for old, new in sorted(id_map.items())
+        if old in backup_refs and new in current_refs
+    ]
+    reasoning_drops = sum(1 for old in dropped_ids if old not in current_ids)
 
     return StructuredDiff(
         session_file=current_path.name,
@@ -156,10 +162,9 @@ def compute_structured_diff(current_path: Path, backup_path: Path) -> Structured
         id_changes=id_changes,
         reference_changes=reference_changes,
         reasoning_drops=reasoning_drops,
-        lines_original=len(cur_lines),
-        lines_backup=len(bak_lines),
+        lines_original=current_lines,
+        lines_backup=backup_lines,
     )
-
 
 def rollback_session(
     current_path: Path,

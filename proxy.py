@@ -62,6 +62,7 @@ from aiohttp import web
 from id_rewriter import sanitise_input_array, rewrite_response_object
 from sse_handler import SSELineBuffer, rewrite_sse_line
 from runtime_stats import RuntimeStats
+from transport_policy import TransportCircuitBreaker
 
 # ---------------------------------------------------------------------------
 # Logging setup — SAFE: no auth or body data
@@ -197,14 +198,25 @@ class CodexProxy:
         upstream_proxy: str | None = None,
         proxy_mode: str = "direct",
         transport_mode: str = "auto",
+        circuit_enabled: bool = True,
+        circuit_action: str = "auto_switch",
+        circuit_threshold: int = 3,
+        circuit_cooldown_seconds: int = 15 * 60,
     ) -> None:
         self.upstream_base = upstream_base.rstrip("/")
         self.reasoning_mode = reasoning_mode
         self.port = port
         self.upstream_proxy = upstream_proxy
         self.proxy_mode = proxy_mode
-        self.transport_mode = transport_mode.lower().strip() if transport_mode else "auto"
-        self.stats = RuntimeStats()
+        mode = transport_mode.lower().strip() if transport_mode else "auto"
+        self.transport_mode = mode if mode in {"auto", "websocket", "http"} else "auto"
+        self.circuit_breaker = TransportCircuitBreaker(
+            threshold=max(1, int(circuit_threshold)),
+            cooldown_seconds=max(1, int(circuit_cooldown_seconds)),
+            enabled=bool(circuit_enabled),
+            action_mode=circuit_action,
+        )
+        self.stats = RuntimeStats(self.circuit_breaker, self.transport_mode)
         self._session: aiohttp.ClientSession | None = None
 
     def _mask_url(self, url: str | None) -> str | None:
@@ -284,12 +296,43 @@ class CodexProxy:
                 "http_proxy": self._mask_url(os.environ.get("HTTP_PROXY")),
                 "https_proxy": self._mask_url(os.environ.get("HTTPS_PROXY")),
                 "all_proxy": self._mask_url(os.environ.get("ALL_PROXY")),
-                "no_proxy": os.environ.get("NO_PROXY")
+                "no_proxy": "set (contents redacted)" if (os.environ.get("NO_PROXY") or os.environ.get("no_proxy")) else None
             }
         })
 
     async def handle_stats(self, request: web.Request) -> web.Response:
         return web.json_response(self.stats.snapshot())
+
+    async def handle_control_transport(self, request: web.Request) -> web.Response:
+        data = await request.json()
+        mode = str(data.get("mode", "")).lower().strip()
+        if mode not in {"auto", "websocket", "http"}:
+            return web.json_response({"ok": False, "error": "invalid transport mode"}, status=400)
+        self.transport_mode = mode
+        self.stats.transport_mode = mode
+        return web.json_response({"ok": True, "transport_mode": mode})
+
+    async def handle_control_circuit_config(self, request: web.Request) -> web.Response:
+        data = await request.json()
+        try:
+            threshold = max(1, int(data.get("threshold", self.circuit_breaker.threshold)))
+            cooldown = max(1, int(data.get("cooldown_seconds", self.circuit_breaker.cooldown_seconds)))
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False, "error": "invalid circuit configuration"}, status=400)
+        action = str(data.get("action_mode", self.circuit_breaker.action_mode))
+        if action not in {"auto_switch", "notify_only"}:
+            return web.json_response({"ok": False, "error": "invalid action_mode"}, status=400)
+        self.circuit_breaker.configure(
+            threshold=threshold,
+            cooldown_seconds=cooldown,
+            enabled=bool(data.get("enabled", self.circuit_breaker.enabled)),
+            action_mode=action,
+        )
+        return web.json_response({"ok": True, "circuit_breaker": self.circuit_breaker.snapshot(self.transport_mode)})
+
+    async def handle_control_circuit_reset(self, request: web.Request) -> web.Response:
+        self.circuit_breaker.reset()
+        return web.json_response({"ok": True, "circuit_breaker": self.circuit_breaker.snapshot(self.transport_mode)})
 
     # ------------------------------------------------------------------ #
     # Main proxy catch-all                                                 #
@@ -423,8 +466,8 @@ class CodexProxy:
     ) -> web.WebSocketResponse:
 
         if not self.stats.circuit_breaker.should_allow_websocket(self.transport_mode):
-            logger.info("[WS ] circuit breaker open or mode is HTTP, fast-rejecting WS handshake to trigger HTTP fallback")
-            return web.Response(status=503, text="WebSocket circuit breaker open or disabled, fallback to HTTP")
+            logger.info("[WS ] local transport policy is blocking this WebSocket attempt")
+            return web.Response(status=503, text="WebSocket disabled by local transport policy")
 
         if upstream_url.startswith("https://"):
             upstream_url = "wss://" + upstream_url[8:]
@@ -668,6 +711,10 @@ def make_app(
     upstream_proxy: str | None = None,
     proxy_mode: str = "direct",
     transport_mode: str = "auto",
+    circuit_enabled: bool = True,
+    circuit_action: str = "auto_switch",
+    circuit_threshold: int = 3,
+    circuit_cooldown_seconds: int = 15 * 60,
 ) -> web.Application:
     proxy = CodexProxy(
         upstream_base=upstream_base,
@@ -676,6 +723,10 @@ def make_app(
         upstream_proxy=upstream_proxy,
         proxy_mode=proxy_mode,
         transport_mode=transport_mode,
+        circuit_enabled=circuit_enabled,
+        circuit_action=circuit_action,
+        circuit_threshold=circuit_threshold,
+        circuit_cooldown_seconds=circuit_cooldown_seconds,
     )
 
     async def _startup(app: web.Application) -> None:
@@ -690,6 +741,9 @@ def make_app(
     app.router.add_get("/health", proxy.handle_health)
     app.router.add_get("/health/details", proxy.handle_health_details)
     app.router.add_get("/stats", proxy.handle_stats)
+    app.router.add_post("/control/transport", proxy.handle_control_transport)
+    app.router.add_post("/control/circuit/config", proxy.handle_control_circuit_config)
+    app.router.add_post("/control/circuit/reset", proxy.handle_control_circuit_reset)
     app.router.add_route("*", "/{path_info:.*}", proxy.handle_proxy)
 
     return app
@@ -707,6 +761,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--upstream-proxy", default=os.environ.get("PROXY_UPSTREAM_PROXY", None), help="HTTP proxy URL used when --proxy-mode=explicit")
     p.add_argument("--proxy-mode", choices=["direct", "env", "explicit"], default=os.environ.get("PROXY_MODE", "direct"), help="Outbound networking: true direct, system environment proxy, or explicit proxy URL")
     p.add_argument("--transport-mode", choices=["auto", "websocket", "http"], default=os.environ.get("PROXY_TRANSPORT_MODE", "auto"), help="Transport policy: auto, websocket, or http")
+    p.add_argument("--circuit-enabled", choices=["true", "false"], default=os.environ.get("PROXY_CIRCUIT_ENABLED", "true"), help="Enable WS circuit breaker")
+    p.add_argument("--circuit-action", choices=["auto_switch", "notify_only"], default=os.environ.get("PROXY_CIRCUIT_ACTION", "auto_switch"))
+    p.add_argument("--circuit-threshold", type=int, default=int(os.environ.get("PROXY_CIRCUIT_THRESHOLD", "3")))
+    p.add_argument("--circuit-cooldown-seconds", type=int, default=int(os.environ.get("PROXY_CIRCUIT_COOLDOWN_SECONDS", "900")))
     p.add_argument(
         "--reasoning-mode",
         default=os.environ.get("PROXY_REASONING_MODE", DEFAULT_REASONING_MODE),
@@ -745,6 +803,10 @@ def main() -> None:
         proxy_mode = "explicit"  # backwards-compatible CLI behaviour
     reasoning_mode: str = args.reasoning_mode
     transport_mode: str = args.transport_mode
+    circuit_enabled = args.circuit_enabled == "true"
+    circuit_action: str = args.circuit_action
+    circuit_threshold: int = args.circuit_threshold
+    circuit_cooldown_seconds: int = args.circuit_cooldown_seconds
 
     if not (1 <= port <= 65535):
         raise SystemExit("--port must be between 1 and 65535")
@@ -753,6 +815,8 @@ def main() -> None:
         raise SystemExit("--upstream must be an absolute http(s) URL")
     if proxy_mode == "explicit" and not upstream_proxy:
         raise SystemExit("--proxy-mode=explicit requires --upstream-proxy")
+    if circuit_threshold < 1 or circuit_cooldown_seconds < 1:
+        raise SystemExit("circuit threshold and cooldown must be positive")
 
     print("=" * 60)
     print("  Codex ID compatibility proxy")
@@ -763,6 +827,7 @@ def main() -> None:
         print(f"  Proxy:     {_mask_url(upstream_proxy)}")
     print(f"  Reasoning mode: {reasoning_mode}")
     print(f"  Transport: {transport_mode}")
+    print(f"  Circuit:   enabled={circuit_enabled} action={circuit_action} threshold={circuit_threshold} cooldown={circuit_cooldown_seconds}s")
     print("=" * 60)
     print(f"  Health check: http://127.0.0.1:{port}/health")
     print("=" * 60)
@@ -774,6 +839,10 @@ def main() -> None:
         upstream_proxy=upstream_proxy,
         proxy_mode=proxy_mode,
         transport_mode=transport_mode,
+        circuit_enabled=circuit_enabled,
+        circuit_action=circuit_action,
+        circuit_threshold=circuit_threshold,
+        circuit_cooldown_seconds=circuit_cooldown_seconds,
     )
     web.run_app(app, host="127.0.0.1", port=port, access_log=None)
 

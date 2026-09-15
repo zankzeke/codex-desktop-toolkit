@@ -128,30 +128,41 @@ class NotificationManager:
         self._last_sent[key] = time.time()
 
     def send_notification(self, title: str, message: str, key: str | None = None, cooldown: float = 60.0) -> bool:
-        """Send a non-blocking Windows notification if rate limit allows."""
-        dedup_key = key or f"{title}:{message[:40]}"
+        """Send a non-blocking Windows notification without shell interpolation."""
+        safe_title = " ".join(str(title).splitlines())[:120]
+        safe_message = " ".join(str(message).splitlines())[:500]
+        dedup_key = key or f"{safe_title}:{safe_message[:40]}"
         if not self.should_notify(dedup_key, cooldown):
             return False
 
-        self.record_notified(dedup_key)
-
-        # Dispatch via PowerShell notification if on Windows
         if sys.platform == "win32":
             import subprocess
+            # Notification text is carried only through environment variables;
+            # the PowerShell program itself is fixed and contains no user data.
             ps_script = (
-                f'[void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms"); '
-                f'$obj = New-Object System.Windows.Forms.NotifyIcon; '
-                f'$obj.Icon = [System.Drawing.SystemIcons]::Information; '
-                f'$obj.BalloonTipTitle = "{title}"; '
-                f'$obj.BalloonTipText = "{message}"; '
-                f'$obj.Visible = $True; '
-                f'$obj.ShowBalloonTip(3000);'
+                '[void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms"); '
+                '$obj = New-Object System.Windows.Forms.NotifyIcon; '
+                '$obj.Icon = [System.Drawing.SystemIcons]::Information; '
+                '$obj.BalloonTipTitle = $env:CODEX_BRIDGE_NOTIFY_TITLE; '
+                '$obj.BalloonTipText = $env:CODEX_BRIDGE_NOTIFY_MESSAGE; '
+                '$obj.Visible = $True; '
+                '$obj.ShowBalloonTip(3000); '
+                'Start-Sleep -Milliseconds 3200; '
+                '$obj.Dispose();'
             )
+            env = os.environ.copy()
+            env["CODEX_BRIDGE_NOTIFY_TITLE"] = safe_title
+            env["CODEX_BRIDGE_NOTIFY_MESSAGE"] = safe_message
             try:
-                subprocess.Popen(["powershell", "-NoProfile", "-Command", ps_script],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
             except Exception:
-                pass
+                return False
+        self.record_notified(dedup_key)
         return True
 
 

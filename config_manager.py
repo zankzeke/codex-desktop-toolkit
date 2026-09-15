@@ -6,7 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 import tomlkit
 
@@ -154,14 +154,15 @@ def get_transport_mode() -> str:
 def get_circuit_breaker_config() -> dict[str, Any]:
     state = _load_state()
     cfg = state.get("circuit_breaker") or {}
-    cd_min = int(cfg.get("cooldown_minutes", 15))
-    cd_sec = int(cfg.get("cooldown_seconds", cd_min * 60))
+    cd_min = max(1, int(cfg.get("cooldown_minutes", 15)))
+    cd_sec = max(1, int(cfg.get("cooldown_seconds", cd_min * 60)))
+    action = str(cfg.get("action_mode", "auto_switch"))
     return {
         "enabled": bool(cfg.get("enabled", True)),
-        "action_mode": str(cfg.get("action_mode", "auto_switch")),
+        "action_mode": action if action in {"auto_switch", "notify_only"} else "auto_switch",
         "cooldown_minutes": cd_min,
         "cooldown_seconds": cd_sec,
-        "failure_threshold": int(cfg.get("failure_threshold", 3)),
+        "failure_threshold": max(1, int(cfg.get("failure_threshold", 3))),
     }
 
 
@@ -212,42 +213,38 @@ def save_circuit_breaker_config(
             cd_min = int(current.get("cooldown_minutes", 15))
             cd_sec = int(current.get("cooldown_seconds", cd_min * 60))
 
+    cd_sec = max(1, int(cd_sec))
+    cd_min = max(1, int(cd_min))
     state["circuit_breaker"] = {
         "enabled": bool(d_enabled),
         "action_mode": "auto_switch" if d_action == "auto_switch" else "notify_only",
         "cooldown_minutes": cd_min,
         "cooldown_seconds": cd_sec,
-        "failure_threshold": int(d_thresh),
+        "failure_threshold": max(1, int(d_thresh)),
     }
     _save_state(state)
 
 
 def set_transport_mode(mode: str, port: int | None = None) -> Tuple[bool, str]:
-    """Set transport mode ('auto', 'websocket', 'http') and update config.toml if active."""
+    """Persist transport mode and safely update the managed provider when present."""
     mode = str(mode).lower().strip()
     if mode not in VALID_TRANSPORT_MODES:
         return False, f"Invalid transport mode: {mode!r}. Expected one of {VALID_TRANSPORT_MODES}"
 
-    state = _load_state()
-    state["transport_mode"] = mode
-    _save_state(state)
-
-    # Determine desired supports_websockets
     ws_enabled = mode != "http"
+    state = _load_state()
 
-    # If config exists and openai-idfix is currently active, update supports_websockets
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 doc = tomlkit.load(f)
             providers = doc.get("model_providers", {})
-            if "openai-idfix" in providers:
-                block = providers["openai-idfix"]
-                if block.get("supports_websockets") != ws_enabled:
-                    block["supports_websockets"] = ws_enabled
-                    state["managed_proxy_ws"] = ws_enabled
-
-                    temp_path = CONFIG_PATH.with_suffix(f".tmp.{time.time()}")
+            block = providers.get("openai-idfix") if providers else None
+            if block is not None and block.get("supports_websockets") != ws_enabled:
+                backup_file(CONFIG_PATH)
+                block["supports_websockets"] = ws_enabled
+                temp_path = CONFIG_PATH.with_suffix(f".tmp.{time.time()}")
+                try:
                     with open(temp_path, "w", encoding="utf-8") as f:
                         tomlkit.dump(doc, f)
                         f.flush()
@@ -255,13 +252,22 @@ def set_transport_mode(mode: str, port: int | None = None) -> Tuple[bool, str]:
                     with open(temp_path, "r", encoding="utf-8") as f:
                         tomlkit.load(f)
                     os.replace(temp_path, CONFIG_PATH)
-                    _save_state(state)
-                    return True, f"传输模式已切换为 {mode}，已更新 config.toml (supports_websockets={ws_enabled})。"
+                finally:
+                    if temp_path.exists():
+                        try:
+                            temp_path.unlink()
+                        except OSError:
+                            pass
+                state["managed_proxy_ws"] = ws_enabled
         except Exception as exc:
             return False, f"保存传输模式配置失败: {exc}"
 
-    return True, f"传输模式已更新为 {mode}。"
-
+    state["transport_mode"] = mode
+    try:
+        _save_state(state)
+    except Exception as exc:
+        return False, f"保存传输模式状态失败: {exc}"
+    return True, f"传输模式已更新为 {mode} (supports_websockets={ws_enabled})。"
 
 def update_managed_ws_support(ws_enabled: bool) -> Tuple[bool, str]:
     """Update supports_websockets in config.toml without altering provider or base_url."""
@@ -275,6 +281,8 @@ def update_managed_ws_support(ws_enabled: bool) -> Tuple[bool, str]:
             return False, "openai-idfix provider not found in config.toml"
 
         block = providers["openai-idfix"]
+        if block.get("supports_websockets") != bool(ws_enabled):
+            backup_file(CONFIG_PATH)
         block["supports_websockets"] = bool(ws_enabled)
 
         state = _load_state()

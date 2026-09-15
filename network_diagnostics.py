@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-import ssl
 import time
 import urllib.request
 import winreg
@@ -107,6 +106,13 @@ def check_local_proxy_health(port: int) -> dict[str, Any]:
                 import json
                 res["health_ok"] = True
                 res["details"] = json.loads(resp.read().decode("utf-8"))
+                try:
+                    stats_req = urllib.request.Request(f"http://127.0.0.1:{port}/stats")
+                    with urllib.request.urlopen(stats_req, timeout=2.0) as stats_resp:
+                        if stats_resp.status == 200:
+                            res["stats"] = json.loads(stats_resp.read().decode("utf-8"))
+                except Exception:
+                    res["stats"] = {}
     except Exception:
         # Fallback to simple /health
         try:
@@ -191,9 +197,11 @@ async def check_websocket_connectivity_async(
     timeout: float = 6.0,
     proxy_url: str | None = None,
 ) -> dict[str, Any]:
-    """Probe WebSocket upgrade without sending user chat content."""
+    """Probe WebSocket reachability without pretending auth rejection is a 101 upgrade."""
     res: dict[str, Any] = {
         "ok": False,
+        "reachable": False,
+        "conclusive": True,
         "target": mask_url_sensitive(target_url),
         "status": None,
         "handshake_ms": None,
@@ -203,7 +211,6 @@ async def check_websocket_connectivity_async(
         "error_type": None,
     }
 
-    # Derive wss:// URL
     ws_url = target_url
     if ws_url.startswith("https://"):
         ws_url = "wss://" + ws_url[8:]
@@ -223,22 +230,24 @@ async def check_websocket_connectivity_async(
             ) as ws:
                 res["handshake_ms"] = round((time.monotonic() - t0) * 1000, 1)
                 res["ok"] = True
+                res["reachable"] = True
                 res["protocol"] = ws.protocol
                 await ws.close()
     except aiohttp.WSServerHandshakeError as exc:
         res["handshake_ms"] = round((time.monotonic() - t0) * 1000, 1)
         res["status"] = exc.status
+        res["reachable"] = True
         if exc.status in (401, 403):
-            # Endpoint reached and rejected unauthenticated probe - network & WS handshake path works!
-            res["ok"] = True
-            res["error"] = f"握手通过，上游要求认证 (HTTP {exc.status})"
+            res["conclusive"] = False
+            res["error"] = (
+                f"已到达上游，但匿名探测被鉴权拒绝 (HTTP {exc.status})；"
+                "这不能证明 WebSocket 已完成 101 升级"
+            )
             res["error_type"] = "auth_required"
         elif exc.status >= 500:
-            res["ok"] = False
             res["error"] = f"上游服务拒绝 WebSocket 握手 (HTTP {exc.status})"
             res["error_type"] = f"http_{exc.status}"
         else:
-            res["ok"] = False
             res["error"] = f"WebSocket 握手失败: HTTP {exc.status}"
             res["error_type"] = f"http_{exc.status}"
     except asyncio.TimeoutError:
@@ -247,11 +256,10 @@ async def check_websocket_connectivity_async(
         res["error_type"] = "ws_timeout"
     except Exception as exc:
         res["handshake_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        res["error"] = f"WebSocket 异常: {exc}"
+        res["error"] = f"WebSocket 异常: {type(exc).__name__}"
         res["error_type"] = type(exc).__name__
 
     return res
-
 
 def evaluate_diagnostics(
     local_res: dict[str, Any],
@@ -259,56 +267,72 @@ def evaluate_diagnostics(
     ws_res: dict[str, Any],
     sys_proxy: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compare HTTP vs WS results to form clear conclusions and recommendations."""
+    """Compare HTTP and WS evidence without overstating unauthenticated probes."""
     https_ok = bool(https_res.get("ok"))
     ws_ok = bool(ws_res.get("ok"))
+    ws_inconclusive = bool(ws_res.get("reachable")) and not bool(ws_res.get("conclusive", True))
+    stats = local_res.get("stats") or {}
+    ws_stats = stats.get("websocket") or {}
+    real_ws_handshakes = int(ws_stats.get("handshakes") or 0)
 
     https_status = f"正常 ({https_res.get('total_ms')}ms)" if https_ok else f"失败: {https_res.get('error')}"
-    ws_status = f"正常 ({ws_res.get('handshake_ms')}ms)" if ws_ok else f"失败: {ws_res.get('error')}"
+    if ws_ok:
+        ws_status = f"升级成功 ({ws_res.get('handshake_ms')}ms)"
+    elif ws_inconclusive:
+        ws_status = f"上游可达，但匿名探测无法确认升级 ({ws_res.get('status')})"
+    else:
+        ws_status = f"失败: {ws_res.get('error')}"
 
     recommendations: list[str] = []
 
     if not local_res.get("listening"):
         conclusion = "本地 Toolkit 代理未启动或未正常监听指定端口。"
         recommendations.append("请先在「代理控制」页面启动本地代理。")
+    elif https_ok and ws_inconclusive:
+        if real_ws_handshakes > 0:
+            conclusion = (
+                "HTTPS 正常；匿名 WebSocket 探测因缺少认证无法确认 101 升级，"
+                f"但 Toolkit 已观察到 {real_ws_handshakes} 次真实 Codex WebSocket 成功握手。"
+            )
+            recommendations.append("优先参考真实 Codex 流量统计；若仍频繁出现 1006/timeout，再考虑强制 HTTP。")
+        else:
+            conclusion = (
+                "HTTPS 正常；匿名 WebSocket 探测已到达上游，但被鉴权拒绝。"
+                "仅凭 401/403 不能判断 WebSocket 是否真正可用。"
+            )
+            recommendations.append("让 Codex 发送一次真实请求后再查看 WebSocket 统计，或结合近期 timeout/1006 判断。")
     elif https_ok and not ws_ok:
         conclusion = (
             "HTTPS 访问正常，但 WebSocket 握手失败或超时。\n"
-            "这种情况通常发生在部分网络中间件、VPN、TUN 或代理软件未对长连接/WebSocket 协议提供完整转发支持。"
+            "这可能来自代理覆盖不完整、节点/中间层长连接兼容性，或上游暂时异常。"
         )
-        recommendations.append("在 Toolkit 中将传输模式切换为「强制 HTTP」以跳过反复的 WS 重连。")
-        recommendations.append("若使用 Clash / Mihomo 等工具，请检查是否开启了 TUN 模式或节点支持 WebSocket。")
-        recommendations.append("尝试更换科学上网节点后再次体检。")
+        recommendations.append("在 Toolkit 中切换为「强制 HTTP」可避免 Codex 主动尝试 WebSocket。")
+        recommendations.append("若使用 Clash / Mihomo 等工具，可检查 TUN/分流规则并尝试更换节点。")
     elif not https_ok and not ws_ok:
-        # Check if both are 5xx
         h_type = https_res.get("error_type")
-        w_type = ws_res.get("error_type")
         if h_type == "upstream_5xx" or (https_res.get("status") and https_res.get("status") >= 500):
-            conclusion = "HTTPS 与 WebSocket 均返回 5xx 上游错误，疑似 OpenAI / 上游服务暂时不可用。"
+            conclusion = "HTTPS 与 WebSocket 均出现上游 5xx，疑似远端服务暂时不可用。"
             recommendations.append("此故障通常属于服务端临时故障，Toolkit 本地无法修复，请稍后重试。")
-            recommendations.append("访问 status.openai.com 或对应中转站状态页查看故障公告。")
-        elif h_type == "timeout" or w_type == "ws_timeout":
-            conclusion = "HTTPS 与 WebSocket 连接均超时，本地网络无法直连上游服务器。"
-            recommendations.append("请检查是否开启了科学上网代理软件（如 Clash、v2rayN）。")
-            recommendations.append("在 Toolkit「代理控制」配置正确的外发代理地址（如 http://127.0.0.1:7890）。")
+        elif h_type == "timeout" or ws_res.get("error_type") == "ws_timeout":
+            conclusion = "HTTPS 与 WebSocket 连接均超时，本地网络当前无法稳定到达上游。"
+            recommendations.append("检查系统代理、Toolkit 出站代理、VPN/TUN 与节点连通性。")
         else:
             conclusion = f"无法连通上游服务 ({https_res.get('error') or '网络连接受阻'})。"
-            recommendations.append("检查系统 DNS 解析或本地安全防护软件是否拦截了流量。")
-            recommendations.append("检查代理软件配置与节点联通性。")
+            recommendations.append("检查 DNS、本地安全软件以及代理软件配置。")
     elif https_ok and ws_ok:
-        conclusion = "上游网络连通良好，HTTPS 与 WebSocket 握手均正常，当前网络适合使用自动传输模式。"
-        recommendations.append("无需额外调整，可正常配合 Codex Desktop 使用。")
+        conclusion = "上游网络连通良好，HTTPS 与 WebSocket 101 升级均已实际成功。"
+        recommendations.append("无需额外调整，可继续使用自动传输模式。")
     else:
-        conclusion = "WebSocket 正常但 HTTPS 探测异常，这通常是偶发网络抖动。"
-        recommendations.append("稍后重新运行体检以确认结果。")
+        conclusion = "WebSocket 探测成功但 HTTPS 探测异常，建议重新体检确认是否为瞬时网络抖动。"
+        recommendations.append("稍后重新运行体检并结合真实 Codex 流量判断。")
 
     return {
         "https_status": https_status,
         "ws_status": ws_status,
+        "ws_inconclusive": ws_inconclusive,
         "conclusion": conclusion,
         "recommendations": recommendations,
     }
-
 
 def run_full_diagnostics(
     port: int,
