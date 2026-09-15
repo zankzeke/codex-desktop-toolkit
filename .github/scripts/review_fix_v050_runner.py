@@ -13,5 +13,9 @@ text = text.replace(
     'rf"(?ms)^(?:async )?def {re.escape(name)}\\(.*?(?=^(?:async )?def |^class |\\Z)"',
     1,
 )
+# These blocks intentionally contain Python source string literals with \n.
+# Make the outer patch block raw so executing the patcher preserves the escapes.
+text = text.replace("new_eval = '''", "new_eval = r'''", 1)
+text = text.replace("helpers = '''", "helpers = r'''", 1)
 script.write_text(text, encoding="utf-8")
 runpy.run_path(str(script), run_name="__main__")
