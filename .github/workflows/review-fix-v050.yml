@@ -5,8 +5,7 @@ on:
     branches:
       - feat/v050-network-compatibility
     paths:
-      - '.github/scripts/review_fix_v050.py'
-      - '.github/scripts/review_fix_v050_runner.py'
+      - '.github/scripts/review_fix_v050_final.py'
       - '.github/workflows/review-fix-v050.yml'
 
 permissions:
@@ -27,8 +26,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Apply review fixes
-        run: python .github/scripts/review_fix_v050_runner.py
+      - name: Apply final review hardening
+        run: python .github/scripts/review_fix_v050_final.py
 
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
@@ -44,10 +43,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backup_manager.py codex_toolkit_gui.py config_manager.py network_diagnostics.py proxy.py proxy_discovery.py runtime_stats.py startup_manager.py transport_policy.py tests/test_network_diagnostics.py tests/test_v050_review_fixes.py
+          git add codex_toolkit_gui.py config_manager.py proxy.py support_bundle.py transport_policy.py tests/test_v050_review_fixes.py
           if (git diff --cached --quiet) {
             Write-Host "No source changes to commit."
             exit 0
           }
-          git commit -m "fix(v0.5.0): harden network recovery behavior after review"
+          git commit -m "fix(v0.5.0): complete transport fallback and privacy hardening"
           git push origin HEAD:feat/v050-network-compatibility
