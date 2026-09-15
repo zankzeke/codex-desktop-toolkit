@@ -119,6 +119,9 @@ def get_diagnostics(port: int) -> dict[str, Any]:
     return diag
 
 
+collect_diagnostics = get_diagnostics
+
+
 def build_diagnostic_report(data: dict[str, Any], app_version: str) -> str:
     """Create a Markdown report containing only privacy-safe diagnostics."""
     codex = data.get("codex", {})

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from error_classifier import classify_error, classify_ws_close
+from transport_policy import TransportCircuitBreaker
 
 
 def _now() -> str:
@@ -18,8 +19,13 @@ def _safe_path(path: str) -> str:
 class RuntimeStats:
     """Small in-memory status store exposed only on localhost via /stats."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        circuit_breaker: TransportCircuitBreaker | None = None,
+        transport_mode: str = "auto",
+    ) -> None:
         self.started_at = _now()
+        self.transport_mode = transport_mode
         self.requests_total = 0
         self.responses_total = 0
         self.status_counts: dict[str, int] = {}
@@ -41,6 +47,7 @@ class RuntimeStats:
         self.ws_last_disconnected_at: str | None = None
         self.ws_last_close_code: int | None = None
         self.ws_last_close_category: str | None = None
+        self.circuit_breaker = circuit_breaker or TransportCircuitBreaker()
 
     def record_request(self, method: str, path: str, transport: str = "http") -> None:
         self.requests_total += 1
@@ -81,10 +88,12 @@ class RuntimeStats:
         self.ws_active += 1
         self.last_transport = "websocket"
         self.ws_last_connected_at = _now()
+        self.circuit_breaker.record_success()
 
     def ws_failed(self, message: str | None = None) -> None:
         self.ws_failures += 1
         self.record_error(502, message or "websocket connection failed")
+        self.circuit_breaker.record_failure(message or "websocket connection failed")
 
     def ws_closed(self, code: int | None) -> None:
         self.ws_active = max(0, self.ws_active - 1)
@@ -94,6 +103,9 @@ class RuntimeStats:
         self.ws_last_close_category = info["category"]
         if info["category"] != "ok":
             self.last_error = {**info, "at": _now()}
+            self.circuit_breaker.record_failure(
+                f"websocket closed abnormally ({self.ws_last_close_code})"
+            )
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -111,6 +123,7 @@ class RuntimeStats:
             "id_fixes_total": self.id_fixes_total,
             "reasoning_drops_total": self.reasoning_drops_total,
             "last_error": dict(self.last_error) if self.last_error else None,
+            "circuit_breaker": self.circuit_breaker.snapshot(self.transport_mode),
             "websocket": {
                 "active": self.ws_active,
                 "handshakes": self.ws_handshakes,

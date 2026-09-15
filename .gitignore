@@ -28,4 +28,7 @@ config.toml
 # Packaging
 build/
 dist/
+release/
 *.egg-info/
+*.zip
+CodexBridgeToolkit-*/
