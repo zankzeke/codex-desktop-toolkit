@@ -6,6 +6,8 @@ from typing import Any
 
 from error_classifier import classify_error, classify_ws_close
 
+WS_BREAKER_THRESHOLD = 3
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -37,6 +39,11 @@ class RuntimeStats:
         self.ws_handshakes = 0
         self.ws_reconnects = 0
         self.ws_failures = 0
+        self.ws_consecutive_failures = 0
+        self.ws_breaker_threshold = WS_BREAKER_THRESHOLD
+        self.ws_breaker_tripped = False
+        self.ws_breaker_tripped_at: str | None = None
+        self.ws_last_failure_at: str | None = None
         self.ws_last_connected_at: str | None = None
         self.ws_last_disconnected_at: str | None = None
         self.ws_last_close_code: int | None = None
@@ -79,11 +86,20 @@ class RuntimeStats:
             self.ws_reconnects += 1
         self.ws_handshakes += 1
         self.ws_active += 1
+        self.ws_consecutive_failures = 0
+        self.ws_breaker_tripped = False
+        self.ws_breaker_tripped_at = None
         self.last_transport = "websocket"
         self.ws_last_connected_at = _now()
 
     def ws_failed(self, message: str | None = None) -> None:
         self.ws_failures += 1
+        self.ws_consecutive_failures += 1
+        self.ws_last_failure_at = _now()
+        if self.ws_consecutive_failures >= self.ws_breaker_threshold:
+            if not self.ws_breaker_tripped:
+                self.ws_breaker_tripped_at = _now()
+            self.ws_breaker_tripped = True
         self.record_error(502, message or "websocket connection failed")
 
     def ws_closed(self, code: int | None) -> None:
@@ -94,6 +110,9 @@ class RuntimeStats:
         self.ws_last_close_category = info["category"]
         if info["category"] != "ok":
             self.last_error = {**info, "at": _now()}
+            # Abnormal closes are meaningful for fallback guidance, but they do
+            # not represent failed upstream handshakes and therefore do not
+            # increment the handshake circuit breaker counter here.
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -116,6 +135,11 @@ class RuntimeStats:
                 "handshakes": self.ws_handshakes,
                 "reconnects": self.ws_reconnects,
                 "failures": self.ws_failures,
+                "consecutive_failures": self.ws_consecutive_failures,
+                "breaker_threshold": self.ws_breaker_threshold,
+                "breaker_tripped": self.ws_breaker_tripped,
+                "breaker_tripped_at": self.ws_breaker_tripped_at,
+                "last_failure_at": self.ws_last_failure_at,
                 "last_connected_at": self.ws_last_connected_at,
                 "last_disconnected_at": self.ws_last_disconnected_at,
                 "last_close_code": self.ws_last_close_code,
