@@ -1,0 +1,38 @@
+name: Apply v0.5.0 UI integration
+
+on:
+  push:
+    branches: [feat/v050-network-compat]
+    paths:
+      - '.github/workflows/apply-v050-ui.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v050-network-compat
+          fetch-depth: 0
+
+      - name: Apply integration patch
+        run: python .github/scripts/apply_v050.py
+
+      - name: Validate Python syntax
+        run: python -m compileall -q .
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex_toolkit_gui.py proxy.py README.md CHANGELOG.md version.py
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: integrate v0.5.0 network compatibility UX"
+          git push origin HEAD:feat/v050-network-compat
