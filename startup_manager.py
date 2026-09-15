@@ -9,11 +9,17 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "CodexBridgeToolkit"
 
 
-def _command_for_executable(executable: str | Path | None = None) -> str:
+def _command_for_executable(
+    executable: str | Path | None = None,
+    script: str | Path | None = None,
+) -> str:
     if executable is None:
         executable = sys.executable
-    path = str(Path(executable).resolve())
-    return f'"{path}" --background'
+    exe = str(Path(executable).resolve())
+    if script is not None:
+        script_path = str(Path(script).resolve())
+        return f'"{exe}" "{script_path}" --background'
+    return f'"{exe}" --background'
 
 
 def is_startup_supported() -> bool:
@@ -37,7 +43,11 @@ def is_startup_enabled() -> bool:
     return bool(get_startup_command())
 
 
-def set_startup_enabled(enabled: bool, executable: str | Path | None = None) -> tuple[bool, str]:
+def set_startup_enabled(
+    enabled: bool,
+    executable: str | Path | None = None,
+    script: str | Path | None = None,
+) -> tuple[bool, str]:
     if not is_startup_supported():
         return False, "开机启动仅支持 Windows。"
     try:
@@ -50,7 +60,7 @@ def set_startup_enabled(enabled: bool, executable: str | Path | None = None) -> 
             winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
         ) as key:
             if enabled:
-                command = _command_for_executable(executable)
+                command = _command_for_executable(executable, script)
                 winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, command)
                 return True, "已启用 Windows 登录后自动启动 Toolkit。"
             try:
