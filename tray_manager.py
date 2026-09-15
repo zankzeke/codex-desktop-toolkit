@@ -73,6 +73,19 @@ class TrayController:
             self._thread = None
             return False
 
+    def notify(self, title: str, message: str) -> bool:
+        """Best-effort native notification; silently no-op when unavailable."""
+        if self._icon is None and not self.show():
+            return False
+        try:
+            notify = getattr(self._icon, "notify", None)
+            if callable(notify):
+                notify(message, title)
+                return True
+        except Exception:
+            pass
+        return False
+
     def stop(self) -> None:
         icon, self._icon = self._icon, None
         if icon is not None:
