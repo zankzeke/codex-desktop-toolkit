@@ -6,6 +6,7 @@ on:
       - feat/v050-network-compatibility
     paths:
       - '.github/scripts/review_fix_v050.py'
+      - '.github/scripts/review_fix_v050_runner.py'
       - '.github/workflows/review-fix-v050.yml'
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Apply review fixes
-        run: python .github/scripts/review_fix_v050.py
+        run: python .github/scripts/review_fix_v050_runner.py
 
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
