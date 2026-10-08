@@ -27,6 +27,7 @@ The toolkit provides both an **offline JSONL fixer** and a **local live proxy** 
 - WebSocket bidirectional rewrite, subprotocol forwarding, close handling, and selected Codex upgrade metadata forwarding.
 - Per-request/per-connection ID maps; concurrent streams do not share mutable request state.
 - `config.toml` editing through `tomlkit`, with automatic backups and provider restore support.
+- Optional **Codex Desktop/CLI auto-attach**: while Toolkit is running, pre-start its local proxy, pre-apply the managed provider, and detect new `Codex.exe` launches (including CLI sessions started by Cockpit). No forced process restart; existing sessions might require a manual restart.
 - Offline session backups and atomic replacement.
 - Multi-theme GUI for session scanning/fixing, proxy control, config injection, logs, and diagnostics.
 - Closing the GUI stops the full packaged proxy process tree; stale `CodexBridgeProxy.exe` listeners can be detected and cleaned up on the next start.

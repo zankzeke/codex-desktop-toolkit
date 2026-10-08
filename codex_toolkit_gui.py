@@ -187,6 +187,8 @@ class App(tk.Tk):
         self._proxy_log_thread: threading.Thread | None = None
         self._sessions: list[dict] = []
         self._closing = False
+        self._auto_attach_poll_busy = False
+        self._auto_attach_was_running = False
 
         self._theme_manager = ThemeManager(self, ASSETS_DIR)
         self.palette = self._theme_manager.palette
@@ -229,10 +231,39 @@ class App(tk.Tk):
             action_mode=cb_cfg.get("action_mode", "auto_switch"),
         )
 
-        # Automation check: auto-start proxy if enabled
+        # Auto-attach pre-arms the proxy/provider before Cockpit or a CLI
+        # starts Codex, avoiding a startup-time config-reading race.
         auto_settings = load_automation_settings()
-        if auto_settings.auto_start_proxy:
+        if auto_settings.auto_start_proxy or auto_settings.auto_attach_codex:
             self.after(600, self._proxy_tab._start_proxy)
+        self.after(1600, self._poll_codex_auto_attach)
+
+    def _poll_codex_auto_attach(self):
+        """Poll process presence outside Tk; never block the UI on tasklist."""
+        if self._closing:
+            return
+        settings = load_automation_settings()
+        if not settings.auto_attach_codex:
+            self._auto_attach_was_running = False
+        elif not self._auto_attach_poll_busy:
+            self._auto_attach_poll_busy = True
+
+            def check():
+                running = is_codex_running()
+                if not self._closing:
+                    self.after(0, lambda: self._on_codex_presence(running))
+
+            threading.Thread(target=check, daemon=True).start()
+        self.after(2500, self._poll_codex_auto_attach)
+
+    def _on_codex_presence(self, running: bool):
+        self._auto_attach_poll_busy = False
+        if self._closing or not load_automation_settings().auto_attach_codex:
+            self._auto_attach_was_running = False
+            return
+        if running and not self._auto_attach_was_running:
+            self._proxy_tab._arm_auto_attach(codex_detected=True)
+        self._auto_attach_was_running = running
 
     def select_tab(self, tab):
         try:
@@ -377,14 +408,8 @@ class OverviewTab(ttk.Frame):
             font=("Segoe UI", 14, "bold"),
             foreground=self._app.palette["accent"],
         ).pack(anchor=tk.W)
-        ttk.Label(
-            header,
-            text="Codex 网络兼容 + 自动诊断 + 自动恢复控制台",
-            foreground=self._app.palette["muted"],
-        ).pack(anchor=tk.W, pady=(2, 0))
-
         # Three-layer status card frame
-        status_box = ttk.LabelFrame(self, text=" 实时连接状态（三层判定） ")
+        status_box = ttk.LabelFrame(self, text=" 实时连接状态 ")
         status_box.pack(fill=tk.X, padx=16, pady=8)
 
         cards = ttk.Frame(status_box)
@@ -1374,7 +1399,7 @@ class ProxyTab(ttk.Frame):
                     notice = "WebSocket 连续失败；当前为仅提示模式，可运行网络体检或切换强制 HTTP"
                 GLOBAL_NOTIFIER.send_notification("Codex Bridge Toolkit", notice, key="circuit_open")
 
-        if auto_cfg.auto_stop_proxy_on_exit and healthy:
+        if auto_cfg.auto_stop_proxy_on_exit and not auto_cfg.auto_attach_codex and healthy:
             codex_running = is_codex_running()
             if getattr(self, "_had_codex_running", False) and not codex_running:
                 cfg_now = get_proxy_config_status()
@@ -1600,6 +1625,50 @@ class ProxyTab(ttk.Frame):
         if not proc or proc.poll() is not None:
             self._launch_pending = False
 
+    def _arm_auto_attach(self, *, codex_detected: bool = False):
+        """Prepare a live proxy and its provider, without killing running CLI/Desktop."""
+        if self._app._closing or not load_automation_settings().auto_attach_codex:
+            return
+        proc = self._app._proxy_proc
+        if not proc or proc.poll() is not None:
+            self._append_log("[自动接入] 准备本地代理，供 Codex Desktop/CLI 使用。", "info")
+            self._start_proxy()
+            return
+
+        try:
+            port = int(self._port_var.get().strip())
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            self._append_log("[自动接入] 本地端口无效，未修改 Codex 配置。", "error")
+            return
+
+        # A launched process is not proof the child proxy is ready yet.
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.7) as resp:
+                if resp.status != 200:
+                    return
+        except Exception:
+            return
+
+        status = get_proxy_config_status(port)
+        if status.get("active_for_port"):
+            return
+        if status.get("active") and status.get("managed_snapshot_matches") is False:
+            self._append_log("[自动接入] 检测到受管理 provider 的上游地址被外部修改，跳过自动覆盖。", "warn")
+            return
+        ok, msg = enable_proxy_config(port, self._ws_var.get())
+        self._append_log(
+            "[自动接入] 已预配置 Codex Desktop/CLI 的 provider。"
+            if ok else f"[自动接入] 写入 provider 失败：{msg}",
+            "ok" if ok else "error",
+        )
+        if ok and codex_detected:
+            self._append_log(
+                "[自动接入] 已检测到 Codex 进程；已写入配置，但运行中的会话可能需要重启才能生效（不会强制关闭 CLI）。",
+                "warn",
+            )
+
     def _on_proxy_ready(self, port_num: int):
         """Make a newly started proxy effective for an already-running Codex."""
         self._set_running(True)
@@ -1609,13 +1678,22 @@ class ProxyTab(ttk.Frame):
             return
         status = get_proxy_config_status(port_num)
         auto_cfg = load_automation_settings()
-        if auto_cfg.auto_apply_provider and not status.get("active_for_port"):
+        if (auto_cfg.auto_apply_provider or auto_cfg.auto_attach_codex) and not status.get("active_for_port"):
             ok, msg = enable_proxy_config(port_num, self._ws_var.get())
             self._append_log(
                 f"[自动化] {'已自动应用 provider' if ok else '自动应用 provider 失败'}: {msg}",
                 "ok" if ok else "error",
             )
             status = get_proxy_config_status(port_num)
+
+        if auto_cfg.auto_attach_codex:
+            # Auto-attach must never unexpectedly taskkill a Cockpit-launched CLI.
+            if is_codex_running():
+                self._append_log(
+                    "[自动接入] Codex 已运行，已准备好配置；该进程若在此前启动，可能需要用户自行重启。",
+                    "warn",
+                )
+            return
 
         if not is_codex_running():
             if not status.get("active_for_port"):
@@ -2463,12 +2541,14 @@ class SettingsTab(ttk.Frame):
         self._startup_var = tk.BooleanVar(value=GLOBAL_STARTUP_MANAGER.is_startup_enabled())
         self._auto_proxy_var = tk.BooleanVar()
         self._auto_provider_var = tk.BooleanVar()
+        self._auto_attach_var = tk.BooleanVar()
         self._auto_stop_var = tk.BooleanVar()
         self._notifications_var = tk.BooleanVar()
 
         auto_cfg = load_automation_settings()
         self._auto_proxy_var.set(auto_cfg.auto_start_proxy)
         self._auto_provider_var.set(auto_cfg.auto_apply_provider)
+        self._auto_attach_var.set(auto_cfg.auto_attach_codex)
         self._auto_stop_var.set(auto_cfg.auto_stop_proxy_on_exit)
         self._notifications_var.set(auto_cfg.windows_notifications)
 
@@ -2488,6 +2568,12 @@ class SettingsTab(ttk.Frame):
             auto_frame,
             text="代理启动成功后自动注入 provider 到 Codex config.toml",
             variable=self._auto_provider_var,
+            command=self._save_automation,
+        ).pack(anchor=tk.W, padx=12, pady=4)
+        ttk.Checkbutton(
+            auto_frame,
+            text="检测 Codex Desktop/CLI 启动并自动接入（会提前启动代理、预写配置；不会强制重启进程）",
+            variable=self._auto_attach_var,
             command=self._save_automation,
         ).pack(anchor=tk.W, padx=12, pady=4)
         ttk.Checkbutton(
@@ -2557,14 +2643,23 @@ class SettingsTab(ttk.Frame):
         self._save_automation()
 
     def _save_automation(self):
+        previous = load_automation_settings()
+        auto_attach = self._auto_attach_var.get()
+        # Keeping the proxy pre-armed conflicts with stopping it whenever
+        # the last Codex process exits; auto-attach takes precedence.
+        if auto_attach and self._auto_stop_var.get():
+            self._auto_stop_var.set(False)
         cfg = AutomationSettings(
             launch_on_startup=self._startup_var.get(),
             auto_start_proxy=self._auto_proxy_var.get(),
             auto_apply_provider=self._auto_provider_var.get(),
+            auto_attach_codex=auto_attach,
             auto_stop_proxy_on_exit=self._auto_stop_var.get(),
             windows_notifications=self._notifications_var.get(),
         )
         save_automation_settings(cfg)
+        if auto_attach and not previous.auto_attach_codex:
+            self._app.after(0, self._app._proxy_tab._arm_auto_attach)
 
     def _save_cb_config(self):
         try:
