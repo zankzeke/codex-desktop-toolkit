@@ -24,6 +24,7 @@ class AutomationSettings:
     launch_on_startup: bool = False
     auto_start_proxy: bool = False
     auto_apply_provider: bool = False
+    auto_attach_codex: bool = False
     auto_stop_proxy_on_exit: bool = False
     windows_notifications: bool = False
 
@@ -42,6 +43,7 @@ def load_automation_settings() -> AutomationSettings:
             launch_on_startup=bool(cfg.get("launch_on_startup", False)),
             auto_start_proxy=bool(cfg.get("auto_start_proxy", False)),
             auto_apply_provider=bool(cfg.get("auto_apply_provider", False)),
+            auto_attach_codex=bool(cfg.get("auto_attach_codex", False)),
             auto_stop_proxy_on_exit=bool(cfg.get("auto_stop_proxy_on_exit", False)),
             windows_notifications=bool(cfg.get("windows_notifications", False)),
         )
