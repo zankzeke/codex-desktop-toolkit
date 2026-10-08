@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 - 2026-10-08
+
+- Added optional Codex Desktop/CLI auto-attach watcher for launches from Cockpit or terminals. When enabled, Toolkit pre-starts its local proxy and pre-applies the managed provider **before** a Codex launch whenever possible.
+- Watches for newly running `Codex.exe` processes, reapplies the managed provider only when needed, and never force-closes a running CLI or Desktop session. Existing sessions may need a manual restart to reload startup-time configuration.
+- Auto-attach is disabled by default, requires Toolkit to stay running (window or tray), and takes precedence over conflicting auto-stop-on-Codex-exit settings.
+- Simplified Overview by removing the decorative tagline and the redundant “（三层判定）” wording.
+
+
 ## 0.5.0 - 2026-09-15
 
 - **Transport Mode Selection**: Added Auto / WebSocket / Force HTTP transport modes configurable via GUI, `config_manager.py`, and `--transport-mode` proxy CLI. Force HTTP mode gracefully rejects WebSocket upgrades to trigger immediate Codex client HTTP fallback.
