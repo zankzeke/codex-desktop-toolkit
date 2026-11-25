@@ -1,7 +1,7 @@
 # Codex Bridge Toolkit for Windows
 
 > **Codex Desktop session repair + ID-fix compatibility proxy + Antigravity/agy network helper for Windows.**  
-> Windows 下的 Codex Desktop 会话修复、Responses API / SSE / WebSocket 本地兼容代理、Antigravity `agy` 专属代理与运行诊断工具。
+> Windows 下的 Codex Desktop 会话修复、Responses API / SSE / WebSocket 本地兼容代理、Antigravity 桌面版与 `agy` 专属代理及运行诊断工具。
 
 [![Latest Release](https://img.shields.io/github/v/release/zankzeke/codex-desktop-toolkit?label=Windows%20Release)](https://github.com/zankzeke/codex-desktop-toolkit/releases/latest)
 [![CI](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/zankzeke/codex-desktop-toolkit/actions/workflows/ci.yml)
@@ -70,11 +70,12 @@ No separate Python installation is required for the packaged release.
 
 The GUI includes four persistent themes: **午夜蓝 / 石墨黑 / 深海蓝 / 明亮**, a dedicated app icon, and Windows title-bar tinting where supported.
 
-## Antigravity / `agy` helper
+## Antigravity Desktop / `agy` proxy
 
-The **Antigravity 网络** tab installs an optional PowerShell wrapper for `agy`. Proxy variables are set only while `agy` is running and are restored afterward, so Codex, Git, Python, npm, and the rest of the shell are not globally proxied. The PowerShell profile is backed up before edits and the hook can be removed from the GUI.
+Enter your HTTP or mixed proxy as `host:port` in **Antigravity 网络**, for example `127.0.0.1:10808` for a v2rayN mixed port. Keep the proxy running when using either feature.
 
-This feature is useful when Antigravity/`agy` needs a dedicated outbound HTTP proxy but you do **not** want to change the networking environment for the entire PowerShell session.
+- **桌面版**：确认 `Antigravity.exe` 路径，点击 **通过代理启动桌面版**。点击 **创建桌面快捷方式** 后，可直接在桌面双击 **Antigravity (Toolkit Proxy)**，无需保持 Toolkit 打开。启动入口会为 Antigravity 及其子进程设置 `HTTP_PROXY`、`HTTPS_PROXY`，并让本机回调绕过代理。首次使用前请完全退出原有 Antigravity 进程（含托盘），否则旧进程无法取得新的环境变量。更改代理地址或移动 Antigravity 后，重新创建快捷方式即可更新。
+- **`agy` CLI**：点击 **安装 agy 专属代理拦截器**，再打开一个新的 PowerShell 窗口。拦截器只为 `agy` 临时设置代理，运行后恢复原环境。安装前会备份 PowerShell profile，拦截器可在同一页面卸载。
 
 ## Requirements
 
@@ -249,6 +250,7 @@ history_fixer.py       offline JSONL repair, backup, atomic replacement
 fix_codex_ids.py       command-line offline fixer
 config_manager.py      config.toml structural editing / provider restore
 powershell_hook.py     optional Antigravity/agy PowerShell wrapper
+antigravity_launcher.py  process-scoped proxy launcher for Antigravity Desktop
 diagnostics.py         local health/diagnostic helpers
 runtime_stats.py       privacy-safe in-memory HTTP/SSE/WebSocket telemetry
 error_classifier.py    human-readable network/upstream error classification

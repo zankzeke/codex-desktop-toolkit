@@ -14,10 +14,10 @@ def get_profile_path() -> Path:
         ps_dir = doc_path / "WindowsPowerShell"
     return ps_dir / "Microsoft.PowerShell_profile.ps1"
 
-def _validate_proxy_address(address: str) -> None:
+def validate_proxy_address(address: str) -> None:
     # Strict check: alphanumeric, dot, hyphen, brackets (for IPv6), and colon.
     # We do a basic structural check to prevent injection: no quotes, semicolons, spaces, newlines.
-    if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:]+\]):\d+", address):
+    if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}", address):
         raise ValueError(f"Invalid proxy address format: {address}")
     host, port_str = address.rsplit(':', 1)
     if not host:
@@ -26,7 +26,7 @@ def _validate_proxy_address(address: str) -> None:
         raise ValueError(f"Invalid proxy port: {port_str}")
 
 def get_hook_script(proxy_address: str) -> str:
-    _validate_proxy_address(proxy_address)
+    validate_proxy_address(proxy_address)
     return f"""
 # --- AGY PROXY HOOK START ---
 function agy {{

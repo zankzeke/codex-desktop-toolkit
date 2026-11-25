@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added a proxy launch button and a Windows desktop shortcut for Antigravity Desktop. The launch sets HTTP proxy variables for the app and preserves local sign-in callbacks. The PowerShell `agy` hook is still available in the same tab.
+
 ## 0.5.1 - 2026-10-08
 
 - Added optional Codex Desktop/CLI auto-attach watcher for launches from Cockpit or terminals. When enabled, Toolkit pre-starts its local proxy and pre-applies the managed provider **before** a Codex launch whenever possible.

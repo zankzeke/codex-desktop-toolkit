@@ -19,7 +19,7 @@ import tkinter as tk
 import urllib.request
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 # ─── 路径配置 ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,7 @@ from config_manager import (
     get_circuit_breaker_config, save_circuit_breaker_config,
 )
 from powershell_hook import install_hook, uninstall_hook, check_hook_status
+from antigravity_launcher import create_antigravity_shortcut, find_antigravity_exe, launch_antigravity
 from ui_theme import ThemeManager
 from version import APP_VERSION
 from tray_manager import TrayController
@@ -2026,8 +2027,8 @@ class AgyTab(ttk.Frame):
         # ── 介绍区 ─────────────────────────────────────────────
         desc_frame = ttk.Frame(self)
         desc_frame.pack(fill=tk.X, padx=12, pady=(12, 6))
-        ttk.Label(desc_frame, text="解决 Antigravity (agy) 在国内网络下的连通性问题", font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
-        ttk.Label(desc_frame, text="通过在 PowerShell 配置中注入代理拦截器，让 agy 命令自动走代理，而不会影响系统全局。").pack(anchor=tk.W, pady=(4, 0))
+        ttk.Label(desc_frame, text="Antigravity 专属代理", font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
+        ttk.Label(desc_frame, text="给桌面版启动时传入代理环境变量，或为 PowerShell 中的 agy 安装拦截器。").pack(anchor=tk.W, pady=(4, 0))
 
         # ── 配置区 ─────────────────────────────────────────────
         cfg = ttk.LabelFrame(self, text=" 代理配置 ")
@@ -2035,9 +2036,27 @@ class AgyTab(ttk.Frame):
 
         row0 = ttk.Frame(cfg)
         row0.pack(fill=tk.X, padx=10, pady=10)
-        ttk.Label(row0, text="目标代理 (HTTP/SOCKS5)：").pack(side=tk.LEFT)
+        ttk.Label(row0, text="HTTP 或混合代理地址（主机:端口）：").pack(side=tk.LEFT)
         self._proxy_var = tk.StringVar(value="127.0.0.1:10808")
         ttk.Entry(row0, textvariable=self._proxy_var, width=30).pack(side=tk.LEFT, padx=(0, 20))
+
+        desktop = ttk.LabelFrame(self, text=" Antigravity 桌面版 ")
+        desktop.pack(fill=tk.X, padx=12, pady=6)
+        path_row = ttk.Frame(desktop)
+        path_row.pack(fill=tk.X, padx=10, pady=(10, 4))
+        self._exe_var = tk.StringVar(value=str(find_antigravity_exe() or ""))
+        ttk.Label(path_row, text="程序路径：").pack(side=tk.LEFT)
+        ttk.Entry(path_row, textvariable=self._exe_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Button(path_row, text="浏览…", command=self._browse_antigravity).pack(side=tk.LEFT)
+
+        desktop_actions = ttk.Frame(desktop)
+        desktop_actions.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Button(desktop_actions, text="通过代理启动桌面版", command=self._launch_antigravity,
+                   style="Accent.TButton").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(desktop_actions, text="创建桌面快捷方式", command=self._create_antigravity_shortcut).pack(side=tk.LEFT)
+        ttk.Label(
+            desktop, text="请保持代理开启，并先完全退出用普通入口启动的 Antigravity。",
+        ).pack(anchor=tk.W, padx=10, pady=(0, 8))
 
         # ── 拦截器管理 ─────────────────────────────────────────
         act = ttk.LabelFrame(self, text=" PowerShell 终端拦截器 ")
@@ -2053,6 +2072,25 @@ class AgyTab(ttk.Frame):
         ttk.Button(row1, text="🗑️ 卸载拦截器", command=self._uninstall_hook).pack(side=tk.LEFT)
         
         self._check_status()
+
+    def _browse_antigravity(self):
+        executable = filedialog.askopenfilename(title="选择 Antigravity.exe", filetypes=[("应用程序", "*.exe")])
+        if executable:
+            self._exe_var.set(executable)
+
+    def _launch_antigravity(self):
+        try:
+            launch_antigravity(Path(self._exe_var.get().strip()), self._proxy_var.get().strip())
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("启动失败", str(exc))
+
+    def _create_antigravity_shortcut(self):
+        try:
+            shortcut = create_antigravity_shortcut(Path(self._exe_var.get().strip()), self._proxy_var.get().strip())
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            messagebox.showerror("创建快捷方式失败", str(exc))
+        else:
+            messagebox.showinfo("快捷方式已创建", f"下次双击此快捷方式即可通过代理启动：\n{shortcut}")
 
     def _check_status(self):
         self._set_status(check_hook_status())
